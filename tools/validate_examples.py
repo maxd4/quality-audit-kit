@@ -36,6 +36,9 @@ def main():
     assert all(f["engine"] in measurement_statuses for f in run["findings"])
     for finding in run["findings"]:
         assert measurement_statuses[finding["engine"]] == "MEASURED", "finding without measured engine"
+        assert finding["measurementStatus"] == "MEASURED", "finding measurement status mismatch"
+        assert finding["provenance"]["kind"] in {"REPORT", "EXECUTION"}
+        assert finding["provenance"]["reference"]
         assert not finding["path"].startswith("/"), "must use repo-relative path"
     for decision in decisions["decisions"]:
         assert decision["findingId"] in ids, "orphan synthetic decision"

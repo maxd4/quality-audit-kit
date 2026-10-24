@@ -59,6 +59,129 @@
       "type": "string",
       "format": "date-time"
     },
+    "discovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositoryRoot",
+        "packageManager",
+        "languages",
+        "workspaces",
+        "scanners",
+        "configurations"
+      ],
+      "properties": {
+        "repositoryRoot": {
+          "const": "."
+        },
+        "packageManager": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "lockfile"
+          ],
+          "properties": {
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "lockfile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "workspaces": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "declared",
+            "packages"
+          ],
+          "properties": {
+            "declared": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "packages": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "scanners": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "installed",
+              "configuration",
+              "packageConfiguration",
+              "scripts"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "installed": {
+                "type": "boolean"
+              },
+              "configuration": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "packageConfiguration": {
+                "type": "boolean"
+              },
+              "scripts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "configurations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "scanner",
+              "path"
+            ],
+            "properties": {
+              "scanner": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
     "engines": {
       "type": "array",
       "minItems": 1,
@@ -115,7 +238,9 @@
           "path",
           "severity",
           "message",
-          "lifecycle"
+          "lifecycle",
+          "measurementStatus",
+          "provenance"
         ],
         "properties": {
           "id": {
@@ -159,6 +284,34 @@
               "RESOLVED",
               "REINTRODUCED"
             ]
+          },
+          "measurementStatus": {
+            "enum": [
+              "MEASURED",
+              "NOT_MEASURED",
+              "FAILURE",
+              "SKIPPED_BY_POLICY"
+            ]
+          },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "reference"
+            ],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "REPORT",
+                  "EXECUTION"
+                ]
+              },
+              "reference": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
           },
           "rawReference": {
             "type": "string"

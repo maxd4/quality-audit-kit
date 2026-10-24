@@ -1,9 +1,12 @@
 # Proposed architecture
 
-**Status:** TARGET. The directory names below are conceptual, not implemented packages.
+**Status:** EXPERIMENTAL SKELETON. The CLI runner, discovery, normalizers and report renderer are implemented; broader package boundaries remain target architecture.
 
 ```text
 quality-audit-kit/
+  bin/                    # portable Node.js entry point
+  src/                    # discovery, scanner adapters, normalization, reports
+  test/                   # dependency-free Node.js integration tests
   packages/
     core/                   # findings, evidence, baselines, triage, policies
     cli/                    # argument parsing and orchestration

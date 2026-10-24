@@ -2,7 +2,7 @@
 
 **Evidence-driven software quality governance.**
 
-> **Status: DESIGN / EXPERIMENTAL.** This repository currently publishes the project specification, draft data contracts and a small validation harness. It does **not** contain a distributable quality-audit CLI, npm package, GitHub Action, or extracted CleanMyMap scanner. Do not use it as a working quality gate.
+> **Status: EXPERIMENTAL.** This repository contains a first local Node.js CLI, draft data contracts and a dependency-free validation harness. It is not yet a published npm package, GitHub Action, dashboard or extracted CleanMyMap scanner. Do not use it as a mature quality gate.
 
 Quality Audit Kit is intended to connect the findings emitted by existing analyzers to explicit, reviewable decisions, baselines and reproducible evidence. Its purpose is **not** to replace ESLint, Knip, jscpd, Semgrep, SonarQube or similar tools.
 
@@ -23,14 +23,14 @@ A quality scan answers what an analyzer found. A maintenance workflow also needs
 
 | Capability | Planned stage | State in this repo |
 | --- | --- | --- |
-| Import existing analyzer output | MVP | Specified, not implemented |
-| Stable finding IDs and history | MVP | Draft contract only |
+| Import existing analyzer output | MVP | Knip and jscpd JSON reports |
+| Stable finding IDs and history | MVP | Stable IDs for the current normalized run |
 | Baseline and new vs historical comparison | MVP | Specified, not implemented |
-| Evidence-aware quality runs | MVP | Draft JSON Schema |
+| Evidence-aware quality runs | MVP | Implemented draft run output with explicit measurement states |
 | Human decisions and stale justification detection | MVP | Draft JSON Schema |
-| JSON and Markdown reports | MVP | Specified, not implemented |
+| JSON and Markdown reports | MVP | Implemented locally |
 | Offline evidence bundles | MVP | Specified, not implemented |
-| npm CLI | After MVP verification | Not implemented |
+| npm CLI | After MVP verification | Local package prototype; not published |
 | GitHub Actions and SARIF export | Later | Not implemented |
 | Dependency graph and architectural radar | Later | Not implemented |
 
@@ -46,7 +46,22 @@ flowchart LR
     F --> G[Report and offline bundle]
 ```
 
-No analyzer is installed or executed by this initial repository.
+This repository installs no analyzer. A target repository's locally installed Knip or jscpd binary is executed only when the user passes `--run`.
+
+## Start the local CLI
+
+Requirements: Node.js 18 or newer. Runtime dependencies are not installed implicitly.
+
+From this repository:
+
+```bash
+node bin/quality-audit-kit.js init /path/to/repository
+node bin/quality-audit-kit.js scan /path/to/repository --output run.json
+node bin/quality-audit-kit.js scan /path/to/repository --run=knip,jscpd --output run.json
+node bin/quality-audit-kit.js report run.json
+```
+
+`init` writes an explicit `quality-audit-kit.config.json` in the target repository. `scan` writes JSON to stdout unless `--output` is provided, and does not modify analyzed source files. Existing `knip-report.json` and `jscpd-report.json` files are imported automatically; `--run` executes only locally installed scanner binaries and never installs dependencies. An absent, skipped or failed scanner remains visible as `NOT_MEASURED` or `FAILURE`; it is never treated as a clean result. See [CLI usage and contracts](docs/cli.md).
 
 ## Read the project
 
@@ -66,7 +81,7 @@ The [example run](examples/run.example.json) and [decision records](examples/dec
 python3 tools/validate_examples.py
 ```
 
-The harness checks a small set of cross-file invariants; it does **not** constitute a complete JSON Schema validator or a functional CLI test.
+The Python harness checks a small set of cross-file invariants, while `npm test` runs real CLI integration tests for report import, stable IDs, discovery and negative measurement states. Neither is a universal quality gate for the analyzed repository.
 
 ## Relationship to CleanMyMap
 

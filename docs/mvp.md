@@ -1,6 +1,6 @@
 # MVP product specification
 
-**Status:** TARGET. None of the capabilities in this document should be described as delivered by this repository.
+**Status:** IN PROGRESS / EXPERIMENTAL. The first local CLI and the initial Knip/jscpd report adapters are delivered; the full MVP is not.
 
 ## Intended initial product
 
@@ -25,16 +25,15 @@ A local-first tool for JS/TS repositories that imports existing scanner outputs 
 - GitHub Action, SARIF and hosted service as MVP blockers.
 - Autonomous acceptance or deletion of findings based solely on an AI suggestion.
 
-## Proposed CLI, not yet available
+## Local CLI prototype
 
 ```text
 quality-audit-kit init
-quality-audit-kit run
-quality-audit-kit triage
+quality-audit-kit scan
 quality-audit-kit report
 ```
 
-`init` may suggest configuration and ask before writing anything. `run` is read-only toward source and policy. `triage` is the only proposed command that intentionally changes decision records, with review checks. `report` formats existing recorded evidence.
+`init` writes an explicit local configuration. `scan` is read-only toward source and policy, imports existing Knip/jscpd JSON reports and can execute locally installed binaries only when `--run` is explicit. `report` formats existing recorded evidence. Baselines, triage mutation and policy gates remain unimplemented.
 
 ## Acceptance criteria
 

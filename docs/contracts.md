@@ -6,7 +6,7 @@ JSON Schema draft 2020-12 is used for machine-readable shape constraints. The pr
 
 ## Run identity
 
-A run has `schemaVersion`, a unique `runId`, a `repository` context, an `inputScope`, an optional audited commit and recorded engines. Reproducibility is a claim that requires proof and must not be inferred merely because a SHA string is present.
+A run has `schemaVersion`, a unique `runId`, a `repository` context, an `inputScope`, an optional audited commit, discovery metadata and recorded engines. Reproducibility is a claim that requires proof and must not be inferred merely because a SHA string is present.
 
 ## Engine status vs run result
 
@@ -26,6 +26,8 @@ Each finding has:
 - `id`: deterministic, namespaced fingerprint from stable canonical input;
 - `engine`, `ruleId`, `path`, `severity`, `message`;
 - `lifecycle`: `NEW`, `HISTORICAL_ACTIONABLE`, `HISTORICAL_JUSTIFIED`, `RESOLVED` or `REINTRODUCED`;
+- `measurementStatus`: the engine evidence state for this finding;
+- `provenance`: whether the finding came from an imported report or an explicit scanner execution, with a report/command reference;
 - source location and an optional `rawReference` to recover original evidence;
 - optional original engine fingerprint, never assumed globally unique.
 

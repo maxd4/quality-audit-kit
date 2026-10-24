@@ -35,6 +35,11 @@
       "severity": "LOW",
       "message": "Synthetic example: helper appears unused.",
       "lifecycle": "HISTORICAL_JUSTIFIED",
+      "measurementStatus": "MEASURED",
+      "provenance": {
+        "kind": "REPORT",
+        "reference": "synthetic-knip.json#finding-1"
+      },
       "rawReference": "synthetic-knip.json#finding-1"
     }
   ]

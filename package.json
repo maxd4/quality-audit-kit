@@ -1,0 +1,17 @@
+{
+  "name": "quality-audit-kit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Evidence-driven software quality governance CLI (experimental).",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "quality-audit-kit": "bin/quality-audit-kit.js"
+  },
+  "scripts": {
+    "check": "node --check bin/quality-audit-kit.js && node --check src/cli.js && node --check src/discovery.js && node --check src/normalize.js && node --check src/scanners.js && node --check src/report.js",
+    "test": "node --test"
+  }
+}

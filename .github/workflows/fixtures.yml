@@ -13,3 +13,7 @@ jobs:
           persist-credentials: false
       - name: Check synthetic contracts
         run: python3 tools/validate_examples.py
+      - name: Check CLI syntax
+        run: npm run check
+      - name: Run CLI tests
+        run: npm test
