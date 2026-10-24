@@ -96,6 +96,8 @@ The order is explained, not scored: confirmed security, regressions, broken cont
 
 `plan --next plan.json` returns the highest-priority lot with all predecessors available. It returns `NEEDS_TRIAGE`, `BLOCKED_BY_MEASUREMENT` or `NEEDS_REVIEW` instead of selecting a correction when the evidence is insufficient. `plan --export plan.json --output codex-prompts` writes one autonomous prompt per lot. Prompts include the objective, approved files, findings and provenance, invariants, verification checks and a stop condition. They do not execute Codex, modify source, change a baseline or install dependencies.
 
+Before `plan --next` or `plan --export`, an existing plan is validated against the correction-plan contract. Export filenames must be simple `.md` names without separators, absolute paths or parent segments; duplicate names, malformed lots, existing destinations and output directories resolved through symbolic links are refused before any prompt is written. The export preflight also verifies every destination's real parent directory and preserves atomic writes and no-overwrite behavior.
+
 Optional planning annotations belong under a finding's `planning` object in the audit-run contract. In particular, `commonCauseId` plus `commonCauseEvidence`/`commonCauseConfirmed` is required for cross-finding grouping; `responsibility`, `category`, `confidence`, `consumers`, `estimatedCost`, `changeRisk` and explicit dependency fields refine the plan without becoming an opaque score.
 
 ## Correction workflow

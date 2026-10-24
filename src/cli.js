@@ -187,6 +187,107 @@ function resolveApprovedTargetFile(root, value) {
   return candidate;
 }
 
+const PLAN_STATUSES = new Set(['READY', 'NEEDS_TRIAGE', 'BLOCKED_BY_MEASUREMENT', 'NEEDS_REVIEW', 'NO_ACTIONABLE_FINDINGS']);
+const LOT_STATUSES = new Set(['READY', 'NEEDS_TRIAGE', 'CYCLE_REQUIRES_REVIEW']);
+const PLAN_KEYS = ['schemaVersion', 'planVersion', 'planType', 'planId', 'runId', 'repository', 'inputScope', 'reproducible', 'status', 'ordering', 'measurementFailures', 'warnings', 'excludedFindings', 'dependencyCycles', 'lots', 'prompts'];
+const LOT_KEYS = ['id', 'category', 'categoryLabel', 'title', 'status', 'findings', 'files', 'responsibility', 'cause', 'dependencies', 'dependencyReasons', 'unresolvedDependencies', 'factors', 'rationale', 'invariants', 'checks', 'stopCondition', 'relationEvidence', 'priority', 'objective', 'prompt'];
+const PROMPT_KEYS = ['lotId', 'priority', 'category', 'fileName', 'content'];
+
+function exactKeys(value, expected, label) {
+  const actual = Object.keys(value).sort();
+  const required = [...expected].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(required)) throw new Error(`${label} has an invalid structure.`);
+}
+
+function isSafePromptFileName(value) {
+  return typeof value === 'string'
+    && value.length >= 1
+    && value.length <= 128
+    && /^[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(value)
+    && !value.includes('..')
+    && !value.includes('/')
+    && !value.includes('\\')
+    && !path.posix.isAbsolute(value)
+    && !path.win32.isAbsolute(value)
+    && !path.win32.parse(value).root;
+}
+
+function promptFileKey(value) {
+  return process.platform === 'win32' ? value.toLowerCase() : value;
+}
+
+function validatePlanStructure(plan) {
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) throw new Error('Plan must be a JSON object.');
+  exactKeys(plan, PLAN_KEYS, 'Plan');
+  if (plan.schemaVersion !== '0.1-draft' || plan.planVersion !== '0.1-draft' || plan.planType !== 'QUALITY_CORRECTION_PLAN') throw new Error('Plan contract version or type is invalid.');
+  if (typeof plan.planId !== 'string' || !/^plan-[a-f0-9]{16}$/.test(plan.planId)) throw new Error('Plan identifier is invalid.');
+  if (typeof plan.runId !== 'string' || plan.runId.length < 8) throw new Error('Plan run identifier is invalid.');
+  if (!plan.repository || typeof plan.repository !== 'object' || Array.isArray(plan.repository) || typeof plan.repository.name !== 'string' || !plan.repository.name) throw new Error('Plan repository identity is invalid.');
+  if (typeof plan.inputScope !== 'string' || typeof plan.reproducible !== 'boolean' || !PLAN_STATUSES.has(plan.status)) throw new Error('Plan status or context is invalid.');
+  if (!plan.ordering || typeof plan.ordering !== 'object' || plan.ordering.noOpaqueScore !== true || typeof plan.ordering.rule !== 'string' || !Array.isArray(plan.ordering.categories)) throw new Error('Plan ordering contract is invalid.');
+  if (!Array.isArray(plan.measurementFailures) || !Array.isArray(plan.warnings) || !plan.warnings.every((item) => typeof item === 'string') || !Array.isArray(plan.excludedFindings) || !Array.isArray(plan.dependencyCycles) || !plan.dependencyCycles.every((cycle) => Array.isArray(cycle) && cycle.every((item) => typeof item === 'string')) || !Array.isArray(plan.lots) || !Array.isArray(plan.prompts)) throw new Error('Plan collections are invalid.');
+  const lotIds = new Set();
+  const priorities = new Set();
+  for (const lot of plan.lots) {
+    if (!lot || typeof lot !== 'object' || Array.isArray(lot)) throw new Error('Plan contains an invalid correction lot.');
+    exactKeys(lot, LOT_KEYS, 'Correction lot');
+    if (typeof lot.id !== 'string' || !/^lot-[a-f0-9]{16}$/.test(lot.id) || lotIds.has(lot.id)) throw new Error('Plan contains a duplicate or invalid correction lot identifier.');
+    if (!LOT_STATUSES.has(lot.status) || !Number.isInteger(lot.priority) || lot.priority < 1 || priorities.has(lot.priority)) throw new Error('Plan contains an invalid or duplicate lot priority.');
+    if (!Array.isArray(lot.findings) || !Array.isArray(lot.files) || !lot.files.every((file) => typeof file === 'string') || !Array.isArray(lot.dependencies) || !Array.isArray(lot.dependencyReasons) || !Array.isArray(lot.unresolvedDependencies) || !Array.isArray(lot.rationale) || !Array.isArray(lot.invariants) || !Array.isArray(lot.checks) || !Array.isArray(lot.relationEvidence) || typeof lot.prompt !== 'string' || typeof lot.objective !== 'string' || typeof lot.stopCondition !== 'string') throw new Error(`Correction lot ${lot.id} has an invalid structure.`);
+    lotIds.add(lot.id);
+    priorities.add(lot.priority);
+  }
+  const promptNames = new Set();
+  if (plan.prompts.length !== plan.lots.length) throw new Error('Plan prompt and lot counts do not agree.');
+  for (const prompt of plan.prompts) {
+    if (!prompt || typeof prompt !== 'object' || Array.isArray(prompt)) throw new Error('Plan contains an invalid prompt.');
+    exactKeys(prompt, PROMPT_KEYS, 'Plan prompt');
+    if (!lotIds.has(prompt.lotId) || !Number.isInteger(prompt.priority) || prompt.priority < 1 || typeof prompt.category !== 'string' || typeof prompt.content !== 'string' || !prompt.content) throw new Error('Plan prompt metadata is invalid.');
+    if (!isSafePromptFileName(prompt.fileName)) throw new Error(`Plan prompt filename is unsafe: ${String(prompt.fileName)}`);
+    if (promptNames.has(promptFileKey(prompt.fileName))) throw new Error(`Plan contains duplicate prompt filename: ${prompt.fileName}`);
+    promptNames.add(promptFileKey(prompt.fileName));
+  }
+  return plan;
+}
+
+function sameResolvedPath(left, right) {
+  const normalize = (value) => path.normalize(value);
+  if (process.platform === 'win32') return normalize(left).toLowerCase() === normalize(right).toLowerCase();
+  return normalize(left) === normalize(right);
+}
+
+function pathInside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return Boolean(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function preparePromptExport(outputDirectory, prompts) {
+  const lexicalRoot = path.resolve(outputDirectory);
+  const names = new Set();
+  for (const prompt of prompts) {
+    if (!isSafePromptFileName(prompt.fileName)) throw new Error(`Plan prompt filename is unsafe: ${String(prompt.fileName)}`);
+    if (names.has(promptFileKey(prompt.fileName))) throw new Error(`Plan contains duplicate prompt filename: ${prompt.fileName}`);
+    names.add(promptFileKey(prompt.fileName));
+  }
+  fs.mkdirSync(lexicalRoot, { recursive: true });
+  const rootStat = fs.lstatSync(lexicalRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('Prompt export directory must be a real directory, not a symbolic link.');
+  const realRoot = fs.realpathSync(lexicalRoot);
+  if (!sameResolvedPath(realRoot, lexicalRoot)) throw new Error('Prompt export directory resolves through a symbolic link.');
+  const targets = [];
+  for (const prompt of prompts) {
+    const target = path.resolve(lexicalRoot, prompt.fileName);
+    if (!pathInside(lexicalRoot, target)) throw new Error(`Prompt export destination escapes the authorized directory: ${prompt.fileName}`);
+    const parentReal = fs.realpathSync(path.dirname(target));
+    if (!sameResolvedPath(parentReal, realRoot)) throw new Error(`Prompt export destination resolves outside the authorized directory: ${prompt.fileName}`);
+    let targetStat;
+    try { targetStat = fs.lstatSync(target); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (targetStat) throw new Error(`Refusing to overwrite an existing or protected prompt destination: ${prompt.fileName}`);
+    targets.push({ prompt, target });
+  }
+  return { lexicalRoot, targets };
+}
+
 function discoveryForOutput(discovery) {
   return {
     repositoryRoot: '.',
@@ -713,9 +814,9 @@ function planCommand(positional, options) {
 function loadPlanOrCreate(input, options) {
   const inputPath = path.resolve(process.cwd(), input || 'quality-audit-kit.plan.json');
   const value = readJson(inputPath);
-  if (value.planType === 'QUALITY_CORRECTION_PLAN' && Array.isArray(value.lots)) return value;
+  if (value && value.planType === 'QUALITY_CORRECTION_PLAN') return validatePlanStructure(value);
   const context = planContext(inputPath, options);
-  return buildPlan(context.run, { decisions: context.decisions, staleDecisions: context.staleDecisions });
+  return validatePlanStructure(buildPlan(context.run, { decisions: context.decisions, staleDecisions: context.staleDecisions }));
 }
 
 function planNextCommand(positional, options) {
@@ -736,16 +837,13 @@ function planNextCommand(positional, options) {
 }
 
 function planExportCommand(positional, options) {
-  const plan = loadPlanOrCreate(positional[0] || options.plan, options);
-  const outputDirectory = path.resolve(process.cwd(), options.output || 'quality-audit-kit-codex-prompts');
-  fs.mkdirSync(outputDirectory, { recursive: true });
-  const files = [];
-  for (const prompt of plan.prompts || []) {
-    const outputPath = path.join(outputDirectory, prompt.fileName);
-    writeOutput(outputPath, prompt.content);
-    files.push(path.relative(process.cwd(), outputPath).split(path.sep).join('/'));
-  }
-  process.stdout.write(`${JSON.stringify({ command: 'plan --export', status: 'EXPORTED', planId: plan.planId, runId: plan.runId, outputDirectory: path.relative(process.cwd(), outputDirectory).split(path.sep).join('/'), files }, null, 2)}\n`);
+  const plan = validatePlanStructure(loadPlanOrCreate(positional[0] || options.plan, options));
+  const prepared = preparePromptExport(path.resolve(process.cwd(), options.output || 'quality-audit-kit-codex-prompts'), plan.prompts);
+  const files = prepared.targets.map(({ prompt, target }) => {
+    writeOutput(target, prompt.content);
+    return path.relative(process.cwd(), target).split(path.sep).join('/');
+  });
+  process.stdout.write(`${JSON.stringify({ command: 'plan --export', status: 'EXPORTED', planId: plan.planId, runId: plan.runId, outputDirectory: path.relative(process.cwd(), prepared.lexicalRoot).split(path.sep).join('/'), files }, null, 2)}\n`);
 }
 
 async function fixCommand(positional, options) {

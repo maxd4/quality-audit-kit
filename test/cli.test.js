@@ -813,6 +813,76 @@ test('plan groups only evidenced common causes, orders lots and exports Codex pr
   }
 });
 
+test('plan export validates prompt paths before writing and preserves destination protections', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const run = measuredRun({ runId: 'plan-export-0001', seed: 'a', findings: [{ id: 'plan-export-finding', path: 'src/a.js', message: 'export fixture' }] });
+    fs.writeFileSync(path.join(repository, 'run.json'), `${JSON.stringify(run, null, 2)}\n`);
+    const created = runCli(repository, ['plan', 'run.json', '--output', 'plan.json', '--markdown', 'plan.md']);
+    assert.equal(created.status, 0, `${created.stderr}\n${created.stdout}`);
+    const planPath = path.join(repository, 'plan.json');
+    const originalPlan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+
+    const valid = runCli(repository, ['plan', '--export', 'plan.json', '--output', 'prompts-valid']);
+    assert.equal(valid.status, 0, `${valid.stderr}\n${valid.stdout}`);
+    assert.equal(fs.readdirSync(path.join(repository, 'prompts-valid')).length, originalPlan.prompts.length);
+
+    const unsafeNames = ['../outside.md', '../../outside.md', '/tmp/outside.md', 'C:\\outside.md', 'sub\\prompt.md', 'sub/prompt.md'];
+    for (const [index, fileName] of unsafeNames.entries()) {
+      const modified = JSON.parse(JSON.stringify(originalPlan));
+      modified.prompts[0].fileName = fileName;
+      const modifiedPath = path.join(repository, `unsafe-${index}.json`);
+      fs.writeFileSync(modifiedPath, `${JSON.stringify(modified, null, 2)}\n`);
+      const exportDirectory = path.join(repository, `unsafe-${index}`);
+      const rejected = runCli(repository, ['plan', '--export', path.basename(modifiedPath), '--output', path.basename(exportDirectory)]);
+      assert.notEqual(rejected.status, 0, fileName);
+      assert.equal(fs.existsSync(path.join(repository, 'outside.md')), false);
+      assert.equal(fs.existsSync(path.join(repository, 'tmp', 'outside.md')), false);
+      assert.equal(fs.existsSync(exportDirectory), false);
+    }
+
+    const duplicate = JSON.parse(JSON.stringify(originalPlan));
+    duplicate.prompts.push({ ...duplicate.prompts[0], lotId: duplicate.prompts[0].lotId, priority: duplicate.prompts[0].priority + 1 });
+    const duplicatePath = path.join(repository, 'duplicate.json');
+    fs.writeFileSync(duplicatePath, `${JSON.stringify(duplicate, null, 2)}\n`);
+    const duplicateExport = runCli(repository, ['plan', '--export', 'duplicate.json', '--output', 'prompts-duplicate']);
+    assert.notEqual(duplicateExport.status, 0);
+    assert.equal(fs.existsSync(path.join(repository, 'prompts-duplicate')), false);
+
+    const malformed = { planType: 'QUALITY_CORRECTION_PLAN', lots: [] };
+    fs.writeFileSync(path.join(repository, 'malformed.json'), `${JSON.stringify(malformed)}\n`);
+    const malformedExport = runCli(repository, ['plan', '--export', 'malformed.json', '--output', 'prompts-malformed']);
+    assert.notEqual(malformedExport.status, 0);
+    const malformedNext = runCli(repository, ['plan', '--next', 'malformed.json']);
+    assert.notEqual(malformedNext.status, 0);
+    assert.equal(fs.existsSync(path.join(repository, 'prompts-malformed')), false);
+
+    const existing = JSON.parse(JSON.stringify(originalPlan));
+    const existingPath = path.join(repository, 'existing.json');
+    fs.writeFileSync(existingPath, `${JSON.stringify(existing, null, 2)}\n`);
+    const protectedDirectory = path.join(repository, 'prompts-existing');
+    fs.mkdirSync(protectedDirectory);
+    const protectedPath = path.join(protectedDirectory, existing.prompts[0].fileName);
+    fs.writeFileSync(protectedPath, 'human-owned prompt\n');
+    const protectedExport = runCli(repository, ['plan', '--export', 'existing.json', '--output', 'prompts-existing']);
+    assert.notEqual(protectedExport.status, 0);
+    assert.equal(fs.readFileSync(protectedPath, 'utf8'), 'human-owned prompt\n');
+
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'quality-audit-kit-prompt-outside-'));
+    try {
+      const symlinkDirectory = path.join(repository, 'prompts-symlink');
+      fs.symlinkSync(outside, symlinkDirectory, 'junction');
+      const symlinkExport = runCli(repository, ['plan', '--export', 'plan.json', '--output', 'prompts-symlink']);
+      assert.notEqual(symlinkExport.status, 0);
+      assert.equal(fs.readdirSync(outside).length, 0);
+    } finally {
+      cleanup(outside);
+    }
+  } finally {
+    cleanup(repository);
+  }
+});
+
 test('plan exposes dependency cycles and does not merge unsupported relations', () => {
   const repository = makeEmptyRepository();
   try {
