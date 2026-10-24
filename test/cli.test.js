@@ -1245,6 +1245,77 @@ test('threshold application preserves the strictest ratchet, dimensions and unre
   }
 });
 
+test('threshold application refuses invalid configuration structures and preserves file protections', () => {
+  const repository = makeEmptyRepository();
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'quality-audit-kit-config-outside-'));
+  try {
+    const run = measuredRun({ runId: 'threshold-config-integrity-001', seed: '2' });
+    run.metrics = [{ name: 'latency', values: [8, 8, 8, 8], unit: 'ms', direction: 'LOWER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'runtime' }];
+    fs.writeFileSync(path.join(repository, 'run.json'), `${JSON.stringify(run, null, 2)}\n`);
+    const configPath = path.join(repository, 'quality-audit-kit.config.json');
+    const apply = () => runCli(repository, ['thresholds', 'recommend', 'run.json', '--apply', '--approve', '--profile', 'balanced']);
+
+    const validWithoutConfig = apply();
+    assert.equal(validWithoutConfig.status, 0, validWithoutConfig.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).quality.thresholds.profile, 'balanced');
+
+    const validUnknown = { projectField: 'preserve', quality: { unknownQualityField: 'keep-me' } };
+    fs.writeFileSync(configPath, `${JSON.stringify(validUnknown, null, 2)}\n`);
+    const preservedUnknown = apply();
+    assert.equal(preservedUnknown.status, 0, preservedUnknown.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).quality.unknownQualityField, 'keep-me');
+
+    if (process.platform !== 'win32') {
+      fs.chmodSync(configPath, 0o600);
+      assert.equal(apply().status, 0);
+      assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
+      fs.chmodSync(configPath, 0o640);
+      assert.equal(apply().status, 0);
+      assert.equal(fs.statSync(configPath).mode & 0o777, 0o640);
+    }
+
+    const invalidConfigurations = [
+      ['root-array', []],
+      ['quality-array', { quality: ['existing-policy'] }],
+      ['quality-string', { quality: 'existing-policy' }],
+      ['quality-null', { quality: null }],
+    ];
+    for (const [name, invalid] of invalidConfigurations) {
+      fs.writeFileSync(configPath, `${JSON.stringify(invalid)}\n`);
+      const before = fs.readFileSync(configPath, 'utf8');
+      const beforeMode = fs.statSync(configPath).mode & 0o777;
+      const rejected = apply();
+      assert.notEqual(rejected.status, 0, name);
+      assert.equal(fs.readFileSync(configPath, 'utf8'), before, `${name} was mutated`);
+      assert.equal(fs.statSync(configPath).mode & 0o777, beforeMode, `${name} changed permissions`);
+    }
+
+    fs.writeFileSync(configPath, `${JSON.stringify({ quality: { unknownQualityField: 'lock-me' } }, null, 2)}\n`);
+    fs.writeFileSync(`${configPath}.qak-lock`, 'concurrent writer');
+    const locked = apply();
+    assert.notEqual(locked.status, 0);
+    assert.match(locked.stderr, /concurrent configuration write/i);
+    fs.rmSync(`${configPath}.qak-lock`, { force: true });
+
+    const externalConfig = path.join(outside, 'quality-audit-kit.config.json');
+    fs.writeFileSync(externalConfig, `${JSON.stringify({ quality: { unknownQualityField: 'symlink-target' } }, null, 2)}\n`);
+    fs.rmSync(configPath, { force: true });
+    try {
+      fs.symlinkSync(externalConfig, configPath, 'file');
+      const beforeExternal = fs.readFileSync(externalConfig, 'utf8');
+      const symlink = apply();
+      assert.notEqual(symlink.status, 0);
+      assert.match(symlink.stderr, /symbolic-link configuration/i);
+      assert.equal(fs.readFileSync(externalConfig, 'utf8'), beforeExternal);
+    } catch (error) {
+      assert.ok(['EPERM', 'EACCES'].includes(error.code), `unexpected symlink setup error: ${error.message}`);
+    }
+  } finally {
+    cleanup(repository);
+    cleanup(outside);
+  }
+});
+
 test('fix --next previews without mutation and an authorized deterministic cycle resolves with redacted proof', async () => {
   const repository = makeRepository('fix-cycle-fixture');
   try {

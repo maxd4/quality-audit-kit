@@ -81,6 +81,26 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
+function powershellLiteral(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function preserveWindowsAcl(sourcePath, destinationPath) {
+  const script = [
+    `$source = Get-Acl -LiteralPath ${powershellLiteral(sourcePath)}`,
+    `Set-Acl -LiteralPath ${powershellLiteral(destinationPath)} -AclObject $source`,
+    `if (-not (Get-Acl -LiteralPath ${powershellLiteral(destinationPath)})) { exit 2 }`,
+  ].join('; ');
+  let lastResult;
+  for (const executable of ['pwsh.exe', 'powershell.exe']) {
+    const result = spawnSync(executable, ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true });
+    lastResult = result;
+    if (!result.error && result.status === 0) return;
+  }
+  if (lastResult) throw new Error('Windows ACL preservation could not be demonstrated safely.');
+  throw new Error('No supported Windows ACL tool is available for safe configuration replacement.');
+}
+
 function writeJsonAtomicReplace(filePath, value) {
   const target = path.resolve(filePath);
   fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -92,6 +112,7 @@ function writeJsonAtomicReplace(filePath, value) {
   try {
     const existing = fs.existsSync(target) ? fs.lstatSync(target) : null;
     if (existing?.isSymbolicLink()) throw new Error('Refusing to replace a symbolic-link configuration file.');
+    if (existing && !existing.isFile()) throw new Error('Refusing to replace a non-file configuration target.');
     try {
       lockFd = fs.openSync(lockPath, 'wx');
       fs.writeFileSync(lockFd, lockToken, 'utf8');
@@ -103,6 +124,17 @@ function writeJsonAtomicReplace(filePath, value) {
     tempFd = fs.openSync(tempPath, 'wx');
     const content = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
     fs.writeSync(tempFd, content, 0, content.length);
+    if (existing) {
+      const existingMode = existing.mode & 0o7777;
+      try {
+        fs.chmodSync(tempPath, existingMode);
+        const temporaryMode = fs.statSync(tempPath).mode & 0o7777;
+        if (temporaryMode !== existingMode) throw new Error('permission verification failed');
+        if (process.platform === 'win32') preserveWindowsAcl(target, tempPath);
+      } catch {
+        throw new Error('Refusing to replace configuration because its existing permissions could not be preserved safely.');
+      }
+    }
     fs.fsyncSync(tempFd);
     fs.closeSync(tempFd);
     tempFd = undefined;
@@ -155,16 +187,36 @@ function createRunId() {
   return `run-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 }
 
+function isConfigRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateConfigStructure(config) {
+  if (!isConfigRecord(config)) throw new Error(`${CONFIG_FILENAME} must contain a JSON object, not an array or primitive.`);
+  if (Object.prototype.hasOwnProperty.call(config, 'quality') && !isConfigRecord(config.quality)) {
+    throw new Error(`${CONFIG_FILENAME}.quality must be a JSON object when present; no normative mutation was applied.`);
+  }
+  if (config.quality?.baseline !== undefined && (typeof config.quality.baseline !== 'string' || !config.quality.baseline)) {
+    throw new Error(`${CONFIG_FILENAME}.quality.baseline must be a non-empty string; no normative mutation was applied.`);
+  }
+  if (config.quality?.decisions !== undefined && (typeof config.quality.decisions !== 'string' || !config.quality.decisions)) {
+    throw new Error(`${CONFIG_FILENAME}.quality.decisions must be a non-empty string; no normative mutation was applied.`);
+  }
+  if (config.quality?.ratchet !== undefined && !isConfigRecord(config.quality.ratchet)) {
+    throw new Error(`${CONFIG_FILENAME}.quality.ratchet must be a JSON object; no normative mutation was applied.`);
+  }
+  return config;
+}
+
 function loadConfig(root) {
   const configPath = path.join(root, CONFIG_FILENAME);
   if (!fs.existsSync(configPath)) return {};
   const config = readJson(configPath);
-  if (!config || typeof config !== 'object') throw new Error(`${CONFIG_FILENAME} must contain a JSON object`);
-  return config;
+  return validateConfigStructure(config);
 }
 
 function configuredQuality(root, config) {
-  const quality = config.quality && typeof config.quality === 'object' ? config.quality : {};
+  const quality = config.quality === undefined ? {} : config.quality;
   return {
     baseline: quality.baseline || DEFAULT_BASELINE_FILENAME,
     decisions: quality.decisions || DEFAULT_DECISIONS_FILENAME,
@@ -1064,7 +1116,8 @@ function validateThresholdEntry(threshold, label) {
 }
 
 function mergeApprovedThresholdConfig(config, result, proposal, profile) {
-  const existingQuality = config.quality && typeof config.quality === 'object' && !Array.isArray(config.quality) ? config.quality : {};
+  validateConfigStructure(config);
+  const existingQuality = config.quality === undefined ? {} : config.quality;
   const existingThresholds = existingQuality.thresholds === undefined
     ? {}
     : existingQuality.thresholds && typeof existingQuality.thresholds === 'object' && !Array.isArray(existingQuality.thresholds)
