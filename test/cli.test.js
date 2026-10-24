@@ -483,7 +483,13 @@ test('scan applies the ratchet to a complete local execution', () => {
     const binDirectory = path.join(repository, 'node_modules', '.bin');
     fs.mkdirSync(binDirectory, { recursive: true });
     const writeScanner = (name, json) => {
-      fs.writeFileSync(path.join(binDirectory, `${name}.cmd`), `@echo ${json}\r\n@exit /b 0\r\n`);
+      if (process.platform === 'win32') {
+        fs.writeFileSync(path.join(binDirectory, `${name}.cmd`), `@echo ${json}\r\n@exit /b 0\r\n`);
+      } else {
+        const file = path.join(binDirectory, name);
+        fs.writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${json}'\nexit 0\n`);
+        fs.chmodSync(file, 0o755);
+      }
     };
     writeScanner('knip', '{"issues":[{"file":"src.js","exports":[{"name":"old","line":1,"severity":"HIGH"}]}]}');
     writeScanner('jscpd', '{"duplicates":[]}');
@@ -497,7 +503,7 @@ test('scan applies the ratchet to a complete local execution', () => {
     assert.equal(baselineCommit.status, 0, baselineCommit.stderr);
 
     writeScanner('knip', '{"issues":[{"file":"src.js","exports":[{"name":"new","line":1,"severity":"HIGH"}]}]}');
-    const changedScanner = spawnSync('git', ['add', '-f', 'node_modules/.bin/knip.cmd'], { cwd: repository, encoding: 'utf8', windowsHide: true });
+    const changedScanner = spawnSync('git', ['add', '-f', process.platform === 'win32' ? 'node_modules/.bin/knip.cmd' : 'node_modules/.bin/knip'], { cwd: repository, encoding: 'utf8', windowsHide: true });
     assert.equal(changedScanner.status, 0, changedScanner.stderr);
     const scannerCommit = spawnSync('git', ['commit', '-qm', 'new-finding'], { cwd: repository, encoding: 'utf8', windowsHide: true });
     assert.equal(scannerCommit.status, 0, scannerCommit.stderr);
