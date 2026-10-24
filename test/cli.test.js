@@ -1548,6 +1548,59 @@ test('fix validations require explicit effect declarations and reject known muta
   }
 });
 
+test('fix validations suppress npm pre/post hooks and fail closed for unproven managers', () => {
+  const repository = makeRepository('fix-validation-hooks-fixture');
+  const preOutside = path.join(os.tmpdir(), `quality-audit-kit-pre-${process.pid}-${Date.now()}.txt`);
+  const postOutside = path.join(os.tmpdir(), `quality-audit-kit-post-${process.pid}-${Date.now()}.txt`);
+  const previousPre = process.env.QAK_TEST_PRE_HOOK;
+  const previousPost = process.env.QAK_TEST_POST_HOOK;
+  try {
+    const packagePath = path.join(repository, 'package.json');
+    const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    packageJson.scripts.test = 'node -e "process.exit(0)"';
+    packageJson.scripts.pretest = "node -e \"require('fs').writeFileSync(process.env.QAK_TEST_PRE_HOOK, 'pre')\"";
+    packageJson.scripts.posttest = "node -e \"require('fs').writeFileSync(process.env.QAK_TEST_POST_HOOK, 'post')\"";
+    const scriptHash = (script) => crypto.createHash('sha256').update(script).digest('hex');
+    packageJson.qualityAuditKit = {
+      validationPolicy: {
+        scripts: {
+          test: {
+            scriptSha256: scriptHash(packageJson.scripts.test),
+            effects: { read: 'repository', write: 'none', network: 'none', external: 'none', subprocesses: 'declared-only' },
+          },
+        },
+      },
+    };
+    fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+    process.env.QAK_TEST_PRE_HOOK = preOutside;
+    process.env.QAK_TEST_POST_HOOK = postOutside;
+
+    const npmResult = runValidations(repository, { authorizedNames: ['test'] });
+    assert.equal(npmResult.status, 'PASS');
+    assert.equal(npmResult.validations[0].command.includes('--ignore-scripts'), true);
+    assert.equal(npmResult.executionScope.implicitHooks, 'SUPPRESSED_BY_IGNORE_SCRIPTS');
+    assert.deepEqual(npmResult.executionScope.hooks[0].hooks.map((hook) => hook.name), ['pretest', 'posttest']);
+    assert.equal(fs.existsSync(preOutside), false);
+    assert.equal(fs.existsSync(postOutside), false);
+
+    fs.writeFileSync(path.join(repository, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
+    const pnpmResult = runValidations(repository, { authorizedNames: ['test'] });
+    assert.equal(pnpmResult.status, 'BLOCKED');
+    assert.equal(pnpmResult.effectBoundary, 'NOT_EXECUTED');
+    assert.equal(pnpmResult.executionScope.implicitHooks, 'NOT_PROVEN_SUPPRESSED');
+    assert.equal(fs.existsSync(preOutside), false);
+    assert.equal(fs.existsSync(postOutside), false);
+  } finally {
+    if (previousPre === undefined) delete process.env.QAK_TEST_PRE_HOOK;
+    else process.env.QAK_TEST_PRE_HOOK = previousPre;
+    if (previousPost === undefined) delete process.env.QAK_TEST_POST_HOOK;
+    else process.env.QAK_TEST_POST_HOOK = previousPost;
+    try { fs.rmSync(preOutside, { force: true }); } catch { /* cleanup only */ }
+    try { fs.rmSync(postOutside, { force: true }); } catch { /* cleanup only */ }
+    cleanup(repository);
+  }
+});
+
 test('fix status classification never conflates failed, blocked or unverified evidence with resolution', () => {
   const execution = { status: 'COMPLETED' };
   const scope = { clean: true, headChanged: false, allowedChanges: ['src/file.js'] };

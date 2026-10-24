@@ -295,15 +295,31 @@ function forbiddenValidationEffect(script) {
   return match ? match[1] : null;
 }
 
-function validationCommand(root, name) {
-  let packageManager = 'npm';
-  try {
-    const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-    if (fs.existsSync(path.join(root, 'pnpm-lock.yaml'))) packageManager = 'pnpm';
-    else if (fs.existsSync(path.join(root, 'yarn.lock'))) packageManager = 'yarn';
-    else if (packageJson.packageManager?.startsWith('pnpm@')) packageManager = 'pnpm';
-  } catch { /* no package metadata means validations are not runnable */ }
-  return packageManager === 'yarn' ? ['run', name] : ['run', name];
+function validationPackageManager(root, packageJson) {
+  if (fs.existsSync(path.join(root, 'pnpm-lock.yaml'))) return 'pnpm';
+  if (fs.existsSync(path.join(root, 'yarn.lock'))) return 'yarn';
+  if (fs.existsSync(path.join(root, 'bun.lockb'))) return 'bun';
+  const declared = String(packageJson?.packageManager || '').toLowerCase();
+  if (declared.startsWith('pnpm@')) return 'pnpm';
+  if (declared.startsWith('yarn@')) return 'yarn';
+  if (declared.startsWith('bun@')) return 'bun';
+  return 'npm';
+}
+
+function validationHooks(scripts, name) {
+  return [
+    ['pre', `pre${name}`],
+    ['post', `post${name}`],
+  ].filter(([, hookName]) => typeof scripts?.[hookName] === 'string')
+    .map(([phase, hookName]) => ({ phase, name: hookName }));
+}
+
+function validationCommand(packageManager, name) {
+  // npm's documented --ignore-scripts mode still runs the explicitly named
+  // script while suppressing its implicit pre/post scripts. The other
+  // managers are fail-closed below until their exact hook semantics can be
+  // proved for the detected version and invocation.
+  return packageManager === 'npm' ? ['--ignore-scripts', 'run', name] : ['run', name];
 }
 
 function runValidations(root, options = {}) {
@@ -351,22 +367,48 @@ function runValidations(root, options = {}) {
     invalidDeclarations: declarations.map((item) => ({ name: item.name, scriptSha256: item.scriptSha256, forbiddenEffect: item.forbiddenEffect || null })),
     reason: 'Each validation must declare the exact script hash and bounded effects (repository read, no writes, no network, declared subprocesses).',
   };
+  const packageManager = validationPackageManager(root, metadata.packageJson);
+  const hooks = declarations.map((item) => ({ name: item.name, hooks: validationHooks(metadata.scripts, item.name) }));
+  if (packageManager !== 'npm') return {
+    status: 'BLOCKED',
+    validations: [],
+    candidates: names,
+    skipped: names.filter((name) => !authorizedNames.includes(name)),
+    authorization: { required: true, received: true, names: authorizedNames },
+    effectBoundary: 'NOT_EXECUTED',
+    executionScope: {
+      packageManager,
+      explicitScripts: authorizedNames,
+      implicitHooks: 'NOT_PROVEN_SUPPRESSED',
+      hooks,
+      externalEffects: 'NOT_OBSERVABLE',
+    },
+    reason: `Validation is blocked: hook suppression is not proven for ${packageManager}.`,
+  };
   const validations = [];
   for (const item of declarations) {
     const name = item.name;
-    const manager = fs.existsSync(path.join(root, 'pnpm-lock.yaml')) ? 'pnpm' : fs.existsSync(path.join(root, 'yarn.lock')) ? 'yarn' : 'npm';
+    const manager = packageManager;
     const executable = process.platform === 'win32' && manager === 'npm' ? 'npm.cmd' : manager;
-    const command = validationCommand(root, name);
+    const command = validationCommand(manager, name);
     const result = process.platform === 'win32' && executable.toLowerCase().endsWith('.cmd')
       ? spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `${executable} ${command.join(' ')}`], { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 120000 })
       : spawnSync(executable, command, { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 120000 });
+    const hookInfo = hooks.find((entry) => entry.name === name);
     validations.push({
       name,
       status: result.status === 0 ? 'PASS' : result.error?.code === 'ETIMEDOUT' ? 'BLOCKED' : 'FAIL',
       exitCode: result.status,
-      command: `${executable} run ${name}`,
+      command: `${executable} ${command.join(' ')}`,
       scriptSha256: item.scriptSha256,
       declaredEffects: item.declaration.effects,
+      executionScope: {
+        packageManager: manager,
+        explicitScript: name,
+        implicitHooks: 'SUPPRESSED_BY_IGNORE_SCRIPTS',
+        suppressedHooks: hookInfo?.hooks || [],
+        externalEffects: 'NOT_OBSERVABLE',
+      },
       stdout: result.stdout || '',
       stderr: result.stderr || '',
     });
@@ -377,6 +419,13 @@ function runValidations(root, options = {}) {
     candidates: names,
     skipped: names.filter((name) => !authorizedNames.includes(name)),
     authorization: { required: true, received: true, names: authorizedNames },
+    executionScope: {
+      packageManager,
+      explicitScripts: authorizedNames,
+      implicitHooks: 'SUPPRESSED_BY_IGNORE_SCRIPTS',
+      hooks,
+      externalEffects: 'NOT_OBSERVABLE',
+    },
     effectBoundary: 'DECLARED_ONLY_POST_AUDIT',
     externalEffects: 'NOT_OBSERVABLE',
     reason: 'The declared validation ran with explicit authorization; post-run repository observations do not prove absence of external effects.',
