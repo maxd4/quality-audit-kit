@@ -76,6 +76,7 @@
         "unclassified": { "type": "array", "items": { "type": "object" } }
       }
     },
+    "clones": { "type": "object", "additionalProperties": true },
     "measurementFailures": { "type": "array", "items": { "type": "object" } },
     "recommendations": { "type": "array", "items": { "type": "string" } },
     "diagnostics": { "type": "array", "items": { "type": "object" } },

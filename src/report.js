@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
+const { buildCloneAudit, renderCloneMarkdown } = require('./clone-triage');
 
 const SHA_PATTERN = /^[a-f0-9]{40}$/i;
 const MEASUREMENT_STATUSES = new Set(['MEASURED', 'PARTIAL', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY']);
@@ -107,6 +108,7 @@ function buildStructuredReport(inputRun) {
   validateRun(inputRun);
   const run = sanitizeForExport(inputRun);
   const buckets = findingBuckets(run);
+  const clones = run.clones || buildCloneAudit(run);
   const measurements = run.engines.map((engine) => {
     const source = sourceRevisionOf(engine);
     return {
@@ -132,6 +134,7 @@ function buildStructuredReport(inputRun) {
     source: { repository: run.repository.name, contextSha: run.repository.contextCommitSha || run.repository.commitSha || null, inputScope: run.inputScope, reproducible: run.reproducible, generatedAt: run.generatedAt || null },
     measurements,
     findings: buckets,
+    clones,
     measurementFailures: failures,
     recommendations: buildRecommendations(run, buckets, failures),
     ...(Array.isArray(run.diagnostics) && run.diagnostics.length ? { diagnostics: run.diagnostics } : {}),
@@ -176,6 +179,7 @@ function renderMarkdown(run) {
   lines.push(...findingTable('Resolved', report.findings.resolved));
   lines.push(...findingTable('Reintroduced', report.findings.reintroduced));
   lines.push(...findingTable('Unclassified', report.findings.unclassified));
+  lines.push(renderCloneMarkdown(report.clones, { title: '## Clone audit' }).trimEnd(), '');
   lines.push('## Measurement failures', '');
   if (!report.measurementFailures.length) lines.push('None recorded.', '');
   else for (const failure of report.measurementFailures) lines.push(`- **${cell(failure.engine)}**: ${cell(failure.measurementStatus)} / ${cell(failure.validationState)} — ${cell(failure.diagnostic || 'No diagnostic recorded.')}`);
@@ -191,6 +195,7 @@ function renderTerminal(run) {
   for (const measurement of report.measurements) lines.push(`${measurement.runId} | ${measurement.engine} | ${measurement.version} | ${measurement.scope} | ${measurement.sha || 'UNKNOWN'} | ${measurement.validationState} | ${measurement.measurementStatus} | ${measurement.sourceRevision.status}`);
   const counts = Object.fromEntries(Object.entries(report.findings).map(([key, findings]) => [key, findings.length]));
   lines.push('', 'Findings', '--------', `New: ${counts.new}`, `Historical actionable: ${counts.historicalActionable}`, `Historical justified: ${counts.historicalJustified}`, `Resolved: ${counts.resolved}`, `Reintroduced: ${counts.reintroduced}`, `Unclassified: ${counts.unclassified}`);
+  lines.push('', 'Clone audit', '-----------', `Status: ${report.clones.status}`, `Families: ${report.clones.counts.families}`, `Unique occurrences: ${report.clones.counts.occurrences}`, `Unique pairs: ${report.clones.counts.pairs}`);
   const listed = [...report.findings.new, ...report.findings.historicalActionable, ...report.findings.historicalJustified, ...report.findings.reintroduced, ...report.findings.unclassified];
   if (listed.length) { lines.push('', 'ID | Engine | Rule | File | Severity | Lifecycle'); for (const finding of listed) lines.push(`${finding.id} | ${finding.engine} | ${finding.ruleId} | ${finding.path} | ${finding.severity} | ${finding.lifecycle}`); }
   lines.push('', 'Measurement failures', '--------------------');

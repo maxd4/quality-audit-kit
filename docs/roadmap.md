@@ -12,6 +12,7 @@ All stages are **planned**, not committed delivery dates.
 | 5. CLI npm | Prepare a stable command-line package | Private local tarball, installation/uninstallation smoke test and installation docs are present; registry publication, signing and cross-platform release proof remain open |
 | 6. GitHub Actions / SARIF | Optional CI integration and code-scanning output | Manual-only GitHub Actions workflow with `contents: read` is present; remote execution and SARIF consumer compatibility remain open |
 | 7. Architecture radar | Correlate hotspots, structural signals and reviewed decisions | Benchmark vs existing dedicated tools and false-positive review |
+| 8. Clone triage | Regroup existing jscpd evidence into reviewable families | Implemented draft normalizer/triage and CLI; semantic classification, quantified savings and cross-platform scanner validation remain open |
 
 ## Risks and mitigations
 

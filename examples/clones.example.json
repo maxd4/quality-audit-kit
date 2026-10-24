@@ -1,0 +1,100 @@
+{
+  "schemaVersion": "0.1-draft",
+  "auditVersion": "0.1-draft",
+  "status": "MEASURED",
+  "runId": "fictional-clone-run",
+  "source": {
+    "repository": "fictional-demo-repo",
+    "runId": "fictional-clone-run",
+    "inputScope": "WORKTREE_LIVE",
+    "reproducible": false,
+    "sourceRevisions": [
+      {
+        "kind": "REPORT",
+        "reference": "reports/jscpd.json",
+        "revisionStatus": "UNKNOWN",
+        "revisionSha": null
+      }
+    ]
+  },
+  "counts": {
+    "families": 1,
+    "occurrences": 2,
+    "pairs": 1,
+    "actionable": 0,
+    "incomplete": 0
+  },
+  "diagnostics": [],
+  "families": [
+    {
+      "id": "clone-family:example",
+      "grouping": {
+        "source": "NATIVE_FINGERPRINT",
+        "key": "jscpd-fingerprint-example",
+        "derived": false
+      },
+      "scope": "INTER_FILE",
+      "provenance": {
+        "kind": "REPORT",
+        "reference": "reports/jscpd.json",
+        "revisionStatus": "UNKNOWN",
+        "revisionSha": null
+      },
+      "findingIds": ["jscpd:example"],
+      "pairCount": 1,
+      "uniqueOccurrenceCount": 2,
+      "distinctFiles": 2,
+      "files": ["src/canonical.js", "src/legacy.js"],
+      "occurrences": [
+        { "side": "first", "path": "src/canonical.js", "startLine": 10, "endLine": 18 },
+        { "side": "second", "path": "src/legacy.js", "startLine": 42, "endLine": 50 }
+      ],
+      "pairs": [
+        {
+          "key": "src/canonical.js:10:18|src/legacy.js:42:50",
+          "findingId": "jscpd:example",
+          "occurrences": [
+            { "side": "first", "path": "src/canonical.js", "startLine": 10, "endLine": 18 },
+            { "side": "second", "path": "src/legacy.js", "startLine": 42, "endLine": 50 }
+          ]
+        }
+      ],
+      "lineCoverage": {
+        "status": "MEASURED",
+        "unionLines": 18,
+        "byFile": [
+          { "path": "src/canonical.js", "ranges": [[10, 18]], "lines": 9 },
+          { "path": "src/legacy.js", "ranges": [[42, 50]], "lines": 9 }
+        ]
+      },
+      "overlapCount": 0,
+      "dataAvailability": "COMPLETE",
+      "metrics": { "reportedLines": [9], "reportedPercentages": [82], "reportedTokens": [40] },
+      "relatedFindings": [],
+      "qualification": {
+        "category": "REVIEW_REQUIRED",
+        "source": "DETERMINISTIC_OBSERVATION",
+        "evidence": "jscpd demonstrates syntactic similarity only.",
+        "observations": [],
+        "hypotheses": [],
+        "conclusions": [],
+        "approvedDecision": null
+      },
+      "benefit": {
+        "diffusion": 2,
+        "measuredVolume": 18,
+        "sharedResponsibility": "NOT_ESTIMABLE",
+        "divergenceRisk": "NOT_ESTIMABLE",
+        "mutualizationPotential": "NOT_ESTIMABLE",
+        "confidence": "LOW"
+      },
+      "priority": "REVIEW_REQUIRED",
+      "prudence": "REVIEW_REQUIRED",
+      "effort": "MEDIUM",
+      "recommendation": "REVIEW_FIRST",
+      "promptEligible": false
+    }
+  ],
+  "prompts": [],
+  "summary": "jscpd similarity is evidence for review, not proof of semantic duplication, common ownership, safe deletion or quantified savings."
+}

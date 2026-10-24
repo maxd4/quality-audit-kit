@@ -221,31 +221,81 @@ function normalizeKnip(root, report, provenance) {
 function normalizeJscpd(root, report, provenance) {
   const duplicates = Array.isArray(report) ? report : report?.duplicates;
   if (!Array.isArray(duplicates)) throw new Error('Unsupported jscpd JSON report shape');
-  return duplicates.flatMap((duplicate) => {
+  const diagnostics = [];
+  const findings = duplicates.flatMap((duplicate, index) => {
     const first = duplicate?.firstFile || duplicate?.first || {};
     const second = duplicate?.secondFile || duplicate?.second || {};
     const firstPath = first.name || first.path || duplicate?.firstFile;
     const secondPath = second.name || second.path || duplicate?.secondFile;
-    if (!firstPath || !secondPath) return [];
-    const percentage = Number(duplicate?.format?.percentage || duplicate?.percentage || 0);
-    const lines = Number(duplicate?.lines || duplicate?.lineCount || first.end - first.start || 0);
-    const derivedSeverity = percentage >= 20 || lines >= 50 ? 'HIGH' : percentage >= 10 || lines >= 20 ? 'MEDIUM' : 'LOW';
+    const reference = `jscpd://duplicates/${index}`;
+    if (!firstPath || !secondPath) {
+      diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_PATH_MISSING', reference, message: 'jscpd duplicate did not provide both file paths; the clone was not retained.' });
+      return [];
+    }
     const firstRelative = safeRelativePath(root, firstPath);
     const secondRelative = safeRelativePath(root, secondPath);
+    if (firstRelative.startsWith('external/')) diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_PATH_OUTSIDE_REPOSITORY', reference, message: 'jscpd first file is outside the repository; an external placeholder path was retained.' });
+    if (secondRelative.startsWith('external/')) diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_PATH_OUTSIDE_REPOSITORY', reference, message: 'jscpd second file is outside the repository; an external placeholder path was retained.' });
+    const range = (file, side) => {
+      const start = Number(file?.start ?? file?.startLine);
+      const end = Number(file?.end ?? file?.endLine);
+      if (!Number.isInteger(start) || !Number.isInteger(end)) {
+        diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_RANGE_UNAVAILABLE', reference, message: `jscpd ${side} file has no complete integer line range.` });
+        return { startLine: null, endLine: null };
+      }
+      if (start < 1 || end < start) {
+        diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_RANGE_INVALID', reference, message: `jscpd ${side} file has an invalid line range.` });
+        return { startLine: null, endLine: null };
+      }
+      return { startLine: start, endLine: end };
+    };
+    const firstRange = range(first, 'first');
+    const secondRange = range(second, 'second');
+    const numeric = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
+    const percentage = numeric(duplicate?.format?.percentage ?? duplicate?.percentage);
+    const lines = numeric(duplicate?.lines ?? duplicate?.lineCount ?? duplicate?.format?.lines);
+    const tokens = numeric(duplicate?.tokens ?? duplicate?.format?.tokens);
+    const chars = numeric(duplicate?.chars ?? duplicate?.format?.chars);
+    const fragment = duplicate?.fragment ?? duplicate?.format?.fragment ?? null;
+    if (percentage === null && lines === null && tokens === null && chars === null && fragment === null) diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_METRICS_UNAVAILABLE', reference, message: 'jscpd duplicate did not provide a usable clone metric.' });
+    const severityLines = lines ?? (firstRange.startLine !== null ? firstRange.endLine - firstRange.startLine + 1 : 0);
+    const derivedSeverity = percentage !== null && percentage >= 20 || severityLines >= 50
+      ? 'HIGH'
+      : percentage !== null && percentage >= 10 || severityLines >= 20
+        ? 'MEDIUM'
+        : 'LOW';
     const pair = [firstRelative, secondRelative].sort().join('|');
-    const locus = `${pair}|${duplicate?.fragment || duplicate?.tokens || lines}`;
-    return [createFinding({
+    const nativeFingerprint = ['fingerprint', 'cloneId', 'nativeId', 'id'].map((key) => duplicate?.[key]).find((value) => value !== undefined && value !== null && String(value).trim() !== '');
+    const derivedKey = crypto.createHash('sha256').update(JSON.stringify({ pair, firstRange, secondRange, lines, percentage, tokens, chars, fragment })).digest('hex');
+    const finding = createFinding({
       root,
       engine: 'jscpd',
       ruleId: 'duplicate-code',
       path: firstPath,
-      line: Number(first.start) || undefined,
+      line: firstRange.startLine || undefined,
       severityValue: derivedSeverity,
-      message: `Duplicated code with ${secondRelative}${percentage ? ` (${percentage}% similarity)` : ''}`,
-      locus,
+      message: `Duplicated code with ${secondRelative}${percentage !== null ? ` (${percentage}% similarity)` : ''}`,
+      locus: `${pair}|${duplicate?.fragment || duplicate?.tokens || lines || ''}`,
       provenance,
-    })];
+      rawReference: reference,
+    });
+    finding.clone = {
+      scope: firstRelative === secondRelative ? 'INTRA_FILE' : 'INTER_FILE',
+      grouping: nativeFingerprint
+        ? { source: 'NATIVE_FINGERPRINT', key: String(nativeFingerprint), derived: false }
+        : { source: 'DERIVED_PAIR_CHARACTERISTICS', key: `qak:${derivedKey}`, derived: true },
+      nativeFingerprint: nativeFingerprint ? { value: String(nativeFingerprint), source: 'REPORT', verified: true } : null,
+      occurrences: [
+        { side: 'first', path: firstRelative, startLine: firstRange.startLine, endLine: firstRange.endLine },
+        { side: 'second', path: secondRelative, startLine: secondRange.startLine, endLine: secondRange.endLine },
+      ],
+      metrics: { lines, percentage, tokens, chars, fragment },
+      dataAvailability: diagnostics.some((item) => item.reference === reference) ? 'PARTIAL' : 'COMPLETE',
+    };
+    return [finding];
   });
+  Object.defineProperty(findings, 'diagnostics', { value: diagnostics, enumerable: false });
+  return findings;
 }
 
 function normalizeSonar(root, issues, provenance) {

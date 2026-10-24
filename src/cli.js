@@ -27,6 +27,7 @@ const { buildThresholdConfig, recommendThresholds, renderThresholdsMarkdown } = 
 const { executeFix, runValidations, verifyFixResult } = require('./fix');
 const { buildSarif, importSarifFile } = require('./sarif');
 const { connectSonar, importSonar, importSonarExport } = require('./sonar');
+const { buildCloneAudit, renderCloneMarkdown } = require('./clone-triage');
 const {
   TEMPLATE_FILES,
   buildAgentPrompt,
@@ -448,6 +449,7 @@ async function scanCommand(positional, options) {
     };
     engines.push(engine);
     findings.push(...(result.findings || []));
+    diagnostics.push(...(result.diagnostics || []));
   }
 
   if (options['sarif-report'] !== undefined) {
@@ -480,6 +482,8 @@ async function scanCommand(positional, options) {
     findings,
     ...(diagnostics.length ? { diagnostics } : {}),
   };
+
+  run.clones = buildCloneAudit(run);
 
   const configuredBaseline = config.quality?.baseline;
   const baselinePath = options.baseline !== undefined
@@ -1100,6 +1104,28 @@ function reportCommand(positional, options) {
   else process.stdout.write(content);
 }
 
+function clonesCommand(positional, options) {
+  const input = positional[0] || options.run;
+  if (!input) throw new Error('clones requires an audit run JSON path, for example: quality-audit-kit clones run.json --format markdown.');
+  const inputPath = path.resolve(process.cwd(), input);
+  const run = readJson(inputPath);
+  const decisions = options.decisions ? readJson(path.resolve(process.cwd(), options.decisions)) : run.decisions;
+  const audit = buildCloneAudit(run, { decisions });
+  const format = options.format || 'json';
+  if (!['json', 'markdown'].includes(format)) throw new Error(`Unsupported clones format: ${format}. Use json or markdown.`);
+  const content = format === 'markdown' ? renderCloneMarkdown(audit) : `${JSON.stringify(audit, null, 2)}\n`;
+  const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
+  if (outputPath) writeOutput(outputPath, content);
+  else process.stdout.write(content);
+  if (options.export !== undefined) {
+    const prompts = audit.prompts.map((prompt) => ({ fileName: prompt.fileName, content: prompt.prompt }));
+    const prepared = preparePromptExport(path.resolve(process.cwd(), options.export === true ? 'quality-audit-kit-clone-prompts' : options.export), prompts);
+    for (const { prompt, target } of prepared.targets) writeOutput(target, prompt.content);
+  }
+  if (audit.status !== 'MEASURED') process.exitCode = 2;
+  return audit;
+}
+
 const THRESHOLD_DIMENSIONS = ['language', 'workspace', 'fileCategory', 'scope'];
 
 function thresholdSeriesMatches(left, right) {
@@ -1223,6 +1249,7 @@ const COMMAND_HELP = {
   thresholds: 'quality-audit-kit thresholds recommend run.json [--export proposal.json]\nquality-audit-kit thresholds recommend run.json --apply --approve\n  Recommendations are advisory; normative changes require both flags.',
   fix: 'quality-audit-kit fix --next [plan.json] [--output fix-result.json]\nquality-audit-kit fix --next [plan.json] --execute --approve --agent deterministic\n  Preview is read-only. Execution is bounded and requires explicit approval.',
   verify: 'quality-audit-kit verify fix-result.json [--output verification.json]\n  Verifies recorded evidence only; it never executes an agent.',
+  clones: 'quality-audit-kit clones run.json [--format json|markdown] [--output clones.json] [--export prompts]\n  Regroups existing jscpd findings without rerunning a scanner or changing source code.',
 };
 
 function printCompactHelp(command) {
@@ -1252,6 +1279,7 @@ async function main(argv) {
   if (command === 'connect') return connectCommand(positional, options);
   if (command === 'import') return importCommand(positional, options);
   if (command === 'report') return reportCommand(positional, options);
+  if (command === 'clones') return clonesCommand(positional, options);
   if (command === 'thresholds') return thresholdsCommand(positional, options);
   throw new Error(`Unknown command: ${command}. Use --help for usage.`);
 }

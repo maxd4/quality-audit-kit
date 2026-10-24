@@ -647,6 +647,10 @@
           "rawReference": {
             "type": "string"
           },
+          "clone": {
+            "type": "object",
+            "additionalProperties": true
+          },
           "planning": {
             "type": "object",
             "additionalProperties": false,
@@ -673,6 +677,10 @@
           }
         }
       }
+    },
+    "clones": {
+      "type": "object",
+      "additionalProperties": true
     },
     "metrics": {
       "type": "array",

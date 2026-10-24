@@ -134,14 +134,18 @@ async function loadOrRunScanner({ root, scanner, explicitReport, executeScanner,
       };
     }
     const provenance = { kind: 'EXECUTION', reference: `${scanner} -- ${runArguments(scanner, '<temporary-output>').join(' ')}`, sourceRevision };
-    const findings = scanner === 'knip'
+    const normalized = scanner === 'knip'
       ? normalizeKnip(root, parsed, provenance)
       : normalizeJscpd(root, parsed, provenance);
+    const findings = Array.isArray(normalized) ? normalized : normalized.findings;
+    const diagnostics = Array.isArray(normalized?.diagnostics) ? normalized.diagnostics : [];
     return {
-      status: 'MEASURED',
-      gateOutcome: 'INFORMATIVE',
+      status: diagnostics.length ? 'PARTIAL' : 'MEASURED',
+      gateOutcome: diagnostics.length ? 'NOT_EVALUATED' : 'INFORMATIVE',
       sourceRevision,
       ...(result.exitCode !== 0 ? { diagnostic: `${scanner} exited with expected findings code ${result.exitCode}; JSON report was normalized.` } : {}),
+      ...(diagnostics.length ? { diagnostic: `${scanner} report was normalized with ${diagnostics.length} completeness diagnostic(s).` } : {}),
+      diagnostics,
       findings,
     };
   } catch (error) {
@@ -155,10 +159,19 @@ function readAndNormalize(root, scanner, reportPath, sourceKind, sourceRevision)
   try {
     const parsed = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
     const provenance = { kind: sourceKind, reference: relativePath(root, reportPath), sourceRevision };
-    const findings = scanner === 'knip'
+    const normalized = scanner === 'knip'
       ? normalizeKnip(root, parsed, provenance)
       : normalizeJscpd(root, parsed, provenance);
-    return { status: 'MEASURED', gateOutcome: 'INFORMATIVE', sourceRevision, findings };
+    const findings = Array.isArray(normalized) ? normalized : normalized.findings;
+    const diagnostics = Array.isArray(normalized?.diagnostics) ? normalized.diagnostics : [];
+    return {
+      status: diagnostics.length ? 'PARTIAL' : 'MEASURED',
+      gateOutcome: diagnostics.length ? 'NOT_EVALUATED' : 'INFORMATIVE',
+      sourceRevision,
+      ...(diagnostics.length ? { diagnostic: `jscpd report was normalized with ${diagnostics.length} completeness diagnostic(s).` } : {}),
+      diagnostics,
+      findings,
+    };
   } catch (error) {
     return {
       status: 'FAILURE',

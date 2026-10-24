@@ -22,8 +22,8 @@
     "quality-audit-kit": "bin/quality-audit-kit.js"
   },
   "scripts": {
-    "check": "node --check bin/quality-audit-kit.js && node --check src/cli.js && node --check src/discovery.js && node --check src/history.js && node --check src/normalize.js && node --check src/scanners.js && node --check src/report.js && node --check src/planner.js && node --check src/thresholds.js && node --check src/agents.js && node --check src/fix.js && node --check src/templates.js && node --check src/sarif.js && node --check src/sonar.js && node --check tools/sonarqube-console-exporter.js && node --check tools/measure-workflows.js && node --check tools/test-package-install.js",
-    "test": "node --test test/cli.test.js test/sonarqube-console-exporter.test.js",
+    "check": "node --check bin/quality-audit-kit.js && node --check src/cli.js && node --check src/clone-triage.js && node --check src/discovery.js && node --check src/history.js && node --check src/normalize.js && node --check src/scanners.js && node --check src/report.js && node --check src/planner.js && node --check src/thresholds.js && node --check src/agents.js && node --check src/fix.js && node --check src/templates.js && node --check src/sarif.js && node --check src/sonar.js && node --check tools/sonarqube-console-exporter.js && node --check tools/measure-workflows.js && node --check tools/test-package-install.js",
+    "test": "node --test test/cli.test.js test/clone-triage.test.js test/sonarqube-console-exporter.test.js",
     "test:package": "node tools/test-package-install.js"
   }
 }

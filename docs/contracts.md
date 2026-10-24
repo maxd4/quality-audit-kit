@@ -36,6 +36,14 @@ Proposed fingerprint input: `engine + ruleId + normalized repo-relative path + s
 
 `RESOLVED` means absent in a comparable completed measurement, **not** absent when the engine did not run.
 
+## Clone triage contract
+
+The optional `finding.clone` object is additive metadata for `engine: "jscpd"`. It records two repository-relative `occurrences`, exact `startLine`/`endLine` values when the source report provides valid integers, `INTRA_FILE`/`INTER_FILE` scope, reported metrics and `COMPLETE`/`PARTIAL` data availability. A `nativeFingerprint` is present only when jscpd supplied an explicit fingerprint-like field. Otherwise `grouping.source` is `DERIVED_PAIR_CHARACTERISTICS` and its `qak:` key is not a native identity. Normalization emits explicit diagnostics for missing paths, outside paths, invalid/incomplete ranges and unavailable metrics.
+
+`clones` is an optional run/report section produced by deterministic regrouping. Families are merged only when grouping identity, scope and provenance/source-revision evidence are compatible. Pair keys are order-independent; unique occurrences, distinct files, union line coverage and overlaps are calculated without double counting. Shared files create a `SHARED_FILE_ONLY` relation and never prove a common cause, ownership or history. A legacy run without clone metadata is `INSUFFICIENT_DATA`.
+
+The default qualification is `REVIEW_REQUIRED`, because jscpd establishes syntactic similarity only. Observations, hypotheses, conclusions and approved human decisions are separate fields. Priority, prudence and effort remain explainable and conservative: duplication alone cannot infer P0, R4 or a numeric gain; unavailable benefit axes are `NOT_ESTIMABLE`. `KEEP_JUSTIFIED` and `NO_ACTION_NOISE` require a recorded human decision. The `clones` command is read-only toward source and never reruns a scanner, installs a dependency, applies a prompt or weakens a gate.
+
 ## Human decision contract
 
 ## Optional connector contract
