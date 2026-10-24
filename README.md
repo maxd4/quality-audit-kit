@@ -6,6 +6,25 @@
 
 Quality Audit Kit is intended to connect the findings emitted by existing analyzers to explicit, reviewable decisions, baselines and reproducible evidence. Its purpose is **not** to replace ESLint, Knip, jscpd, Semgrep, SonarQube or similar tools.
 
+## Install with your AI agent (Recommended)
+
+```text
+Install Quality Audit Kit from https://github.com/maxd4/quality-audit-kit into this project. Use the repository's current GitHub checkout method (do not use npm, because the package is not published). Automatically create or update only the minimal quality-audit-kit.config.json and protected generic templates, then run an initial read-only audit using existing analyzer reports or only analyzers already installed locally; do not install analyzers implicitly. Generate a Markdown report. Finish with a concise report listing the files created or changed, every command and check actually executed with its result, and the human confirmations still required. Do not modify application source, dependencies, baselines, thresholds or remotes, publish anything, or apply fixes without explicit approval.
+```
+
+## Install manually
+
+```bash
+git clone https://github.com/maxd4/quality-audit-kit.git
+cd quality-audit-kit
+PROJECT_DIR="/absolute/path/to/your-project"
+node bin/quality-audit-kit.js init "$PROJECT_DIR"
+node bin/quality-audit-kit.js scan "$PROJECT_DIR" --output "$PROJECT_DIR/quality-audit-kit.run.json"
+node bin/quality-audit-kit.js report "$PROJECT_DIR/quality-audit-kit.run.json" --format markdown --output "$PROJECT_DIR/quality-audit-kit.report.md"
+```
+
+This current GitHub checkout is the supported installation path: the npm package is private and is not published. The commands require Git and Node.js 18 or newer. `init` creates the minimal configuration and protected generic templates; `scan` imports existing analyzer reports without installing dependencies; and `report` writes a local Markdown report. Replace `PROJECT_DIR` with the absolute path of the repository to audit. The default scan is read-only and reports unavailable analyzers explicitly.
+
 ## Why it exists
 
 A quality scan answers what an analyzer found. A maintenance workflow also needs to answer:
@@ -51,20 +70,17 @@ flowchart LR
 
 This repository installs no analyzer. A target repository's locally installed Knip or jscpd binary is executed only when the user passes `--run`.
 
-## Start the local CLI
+## Use the local CLI
 
 Requirements: Node.js 18 or newer. Runtime dependencies are not installed implicitly. The package intentionally remains `private` until a semver and cross-platform release decision is made.
 
-From this repository:
+Additional local workflows:
 
 ```bash
-node bin/quality-audit-kit.js init /path/to/repository
-node bin/quality-audit-kit.js scan /path/to/repository --output run.json
 node bin/quality-audit-kit.js scan /path/to/repository --run=knip,jscpd --output run.json
 node bin/quality-audit-kit.js baseline run.json --output quality-audit-kit.baseline.json
 node bin/quality-audit-kit.js triage run.json --baseline quality-audit-kit.baseline.json
 node bin/quality-audit-kit.js report run.json
-node bin/quality-audit-kit.js report run.json --format markdown --output report.md
 node bin/quality-audit-kit.js report run.json --format json --output report.json
 node bin/quality-audit-kit.js clones run.json --format markdown --output clones.md
 node bin/quality-audit-kit.js clones run.json --format json --output clones.json --export clone-prompts
@@ -93,10 +109,6 @@ To test the local npm distribution without publishing anything:
 ```bash
 npm pack --ignore-scripts
 npm run test:package
-# Optional local installation from the generated tarball:
-npm install --global ./quality-audit-kit-0.1.0.tgz
-quality-audit-kit --help
-npm uninstall --global quality-audit-kit
 ```
 
 `npm run test:package` packs the allowlisted files, installs the tarball into an isolated temporary consumer with network access disabled, runs the installed binary, and uninstalls it. It does not call `npm publish`.
