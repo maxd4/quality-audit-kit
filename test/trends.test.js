@@ -142,6 +142,18 @@ test('does not demonstrate a rename, reports signature collisions and leaves abs
   assert.equal(missing.currentValue, null);
 });
 
+test('rejects one function id carrying multiple structural identities', () => {
+  const previous = makeRun({ runKey: 'identity-previous', source: 'e', functions: [
+    { functionId: 'v1:collision-id', functionName: 'firstName', pathName: 'src/one.js' },
+    { functionId: 'v1:collision-id', functionName: 'secondName', pathName: 'src/two.js' },
+  ] });
+  const current = makeRun({ runKey: 'identity-current', source: 'f' });
+  const result = compareMaintainabilityRuns(previous, current);
+  assert.equal(result.status, 'COMPARABLE');
+  assert.equal(result.functions.length, 0);
+  assert.equal(result.nonComparableFunctions.some((entry) => entry.reason === 'FUNCTION_ID_COLLISION'), true);
+});
+
 test('rejects incompatible run contracts without manufacturing function deltas', () => {
   const basePrevious = makeRun({ runKey: 'previous', source: 'e' });
   const baseCurrent = makeRun({ runKey: 'current', source: 'f' });

@@ -187,7 +187,9 @@ function buildStructuredReport(inputRun, options = {}) {
   validateRun(inputRun);
   const run = sanitizeForExport(inputRun);
   const buckets = findingBuckets(run);
-  const clones = run.clones || buildCloneAudit(run);
+  // Rebuild from findings and engine evidence so an imported/stale `run.clones`
+  // section cannot promote an unmeasured jscpd run to MEASURED.
+  const clones = buildCloneAudit(run);
   const measurements = run.engines.map((engine) => {
     const source = sourceRevisionOf(engine);
     return {

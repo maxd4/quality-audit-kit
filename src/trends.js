@@ -106,19 +106,22 @@ function indexFunctions(run) {
       continue;
     }
     if (!byId.has(measurement.functionId)) {
-      const entry = { ...functionReference(measurement), measurements: new Map(), duplicateMetrics: new Set() };
+      const entry = { ...functionReference(measurement), measurements: new Map(), duplicateMetrics: new Set(), identityKeys: new Set() };
       byId.set(measurement.functionId, entry);
       const key = signatureKey(entry);
+      entry.identityKeys.add(key);
       if (!bySignature.has(key)) bySignature.set(key, []);
       bySignature.get(key).push(entry);
     }
     const entry = byId.get(measurement.functionId);
+    entry.identityKeys.add(signatureKey(measurement));
     if (entry.measurements.has(measurement.metricId)) entry.duplicateMetrics.add(measurement.metricId);
     else entry.measurements.set(measurement.metricId, measurement);
   }
   const collisions = [];
   for (const entry of byId.values()) {
     if (entry.duplicateMetrics.size) collisions.push({ status: 'NOT_COMPARABLE', reason: 'DUPLICATE_METRIC_FOR_FUNCTION', ...functionReference(entry), metricIds: sortedUnique([...entry.duplicateMetrics]) });
+    if (entry.identityKeys.size > 1) collisions.push({ status: 'NOT_COMPARABLE', reason: 'FUNCTION_ID_COLLISION', ...functionReference(entry), identityKeys: [...entry.identityKeys].sort() });
   }
   for (const [key, entries] of bySignature) {
     if (entries.length > 1) for (const entry of entries) collisions.push({ status: 'NOT_COMPARABLE', reason: 'FUNCTION_SIGNATURE_COLLISION', ...functionReference(entry), signatureKey: key });

@@ -8,6 +8,7 @@ const test = require('node:test');
 const { buildCloneAudit, renderCloneMarkdown } = require('../src/clone-triage');
 const { assessMeasuredRun } = require('../src/history');
 const { normalizeJscpd } = require('../src/normalize');
+const { buildStructuredReport, renderMarkdown } = require('../src/report');
 
 function runWithFindings(findings) {
   return {
@@ -19,6 +20,12 @@ function runWithFindings(findings) {
     engines: [{ name: 'jscpd', measurementStatus: 'MEASURED', gateOutcome: 'INFORMATIVE', sourceRevision: { status: 'UNKNOWN', sha: null, basis: 'fixture' }, scope: '.' }],
     findings,
   };
+}
+
+function runWithEngine(findings, measurementStatus = 'MEASURED') {
+  const run = runWithFindings(findings);
+  run.engines[0].measurementStatus = measurementStatus;
+  return run;
 }
 
 function fixtureFinding(id, firstPath, firstStart, firstEnd, secondPath, secondStart, secondEnd, fingerprint = 'native-1') {
@@ -144,6 +151,50 @@ test('triage groups native families, removes inverted duplicate pairs and unions
   assert.equal(audit.prompts.length, 0);
 });
 
+test('clone audit propagates the jscpd measurement status and never promotes unmeasured findings', () => {
+  const finding = fixtureFinding('status-finding', 'src/a.js', 1, 5, 'src/b.js', 10, 14);
+  assert.equal(buildCloneAudit(runWithEngine([finding], 'MEASURED')).status, 'MEASURED');
+  assert.equal(buildCloneAudit(runWithEngine([finding], 'PARTIAL')).status, 'PARTIAL');
+  for (const status of ['FAILURE', 'NOT_MEASURED', 'SKIPPED_BY_POLICY']) {
+    const audit = buildCloneAudit(runWithEngine([finding], status));
+    assert.equal(audit.status, status);
+    assert.notEqual(audit.status, 'MEASURED');
+    assert.equal(audit.evidenceContext.scanner.measurementStatus, status);
+    assert.equal(audit.evidenceContext.cloneEvidence, 'FINDINGS_PRESENT_UNVERIFIED');
+    assert.equal(audit.diagnostics.some((diagnostic) => diagnostic.code === 'CLONE_ENGINE_STATUS_CONTRADICTION'), true);
+    assert.equal(audit.families.length, 1);
+  }
+  const missingEngine = runWithFindings([finding]);
+  missingEngine.engines = [];
+  const missingAudit = buildCloneAudit(missingEngine);
+  assert.equal(missingAudit.status, 'INSUFFICIENT_DATA');
+  assert.equal(missingAudit.evidenceContext.scanner.measurementStatus, 'NOT_MEASURED');
+  assert.equal(missingAudit.diagnostics.some((diagnostic) => diagnostic.code === 'CLONE_ENGINE_MISSING'), true);
+});
+
+test('measured zero clones is distinct from a historical run without clone metadata', () => {
+  const zero = buildCloneAudit(runWithEngine([]));
+  assert.equal(zero.status, 'MEASURED');
+  assert.equal(zero.evidenceContext.cloneEvidence, 'MEASURED_ZERO');
+  assert.equal(zero.counts.families, 0);
+  assert.equal(zero.diagnostics.some((diagnostic) => diagnostic.code === 'CLONE_ZERO_FINDINGS'), true);
+
+  const legacy = runWithEngine([{ id: 'legacy-jscpd', engine: 'jscpd', path: 'src/a.js' }]);
+  const legacyAudit = buildCloneAudit(legacy);
+  assert.equal(legacyAudit.status, 'INSUFFICIENT_DATA');
+  assert.equal(legacyAudit.evidenceContext.cloneEvidence, 'UNAVAILABLE');
+  assert.equal(legacyAudit.diagnostics.some((diagnostic) => diagnostic.code === 'CLONE_ENRICHMENT_UNAVAILABLE'), true);
+});
+
+test('measured engine with incomplete clone metadata remains partial', () => {
+  const finding = fixtureFinding('partial-finding', 'src/a.js', 1, 5, 'src/b.js', 10, 14);
+  finding.clone.dataAvailability = 'PARTIAL';
+  const audit = buildCloneAudit(runWithEngine([finding], 'MEASURED'));
+  assert.equal(audit.status, 'PARTIAL');
+  assert.equal(audit.evidenceContext.cloneEvidence, 'FINDINGS_PRESENT_PARTIAL');
+  assert.equal(audit.diagnostics.some((diagnostic) => diagnostic.code === 'CLONE_METADATA_INCOMPLETE'), true);
+});
+
 test('triage does not merge same-file pairs with different native identities', () => {
   const audit = buildCloneAudit(runWithFindings([
     fixtureFinding('f1', 'src/a.js', 1, 3, 'src/b.js', 10, 12, 'native-1'),
@@ -255,10 +306,19 @@ test('a decision outside a family has no effect on its decision coverage', () =>
 });
 
 test('legacy runs and missing scanner measurements remain explicit insufficiency', () => {
-  const audit = buildCloneAudit(runWithFindings([]));
+  const audit = buildCloneAudit(runWithEngine([
+    {
+      id: 'legacy-jscpd',
+      engine: 'jscpd',
+      path: 'src/a.js'
+    }
+  ]));
   assert.equal(audit.status, 'INSUFFICIENT_DATA');
   assert.equal(audit.families.length, 0);
-  assert.equal(audit.diagnostics[0].code, 'CLONE_DATA_UNAVAILABLE');
+  assert.equal(
+    audit.diagnostics.some((diagnostic) => diagnostic.code === 'CLONE_ENRICHMENT_UNAVAILABLE'),
+    true
+  );
   assert.match(renderCloneMarkdown(audit), /Données insuffisantes/);
 });
 
@@ -282,6 +342,34 @@ test('clones CLI emits JSON and does not rerun a scanner', () => {
   assert.equal(audit.status, 'MEASURED');
   assert.equal(audit.counts.families, 1);
   assert.deepEqual(fs.readdirSync(root), ['run.json']);
+});
+
+test('clones CLI keeps imported failure status coherent in JSON and Markdown', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-clone-status-cli-'));
+  const run = runWithEngine([fixtureFinding('f-status', 'src/a.js', 1, 3, 'src/b.js', 10, 12)], 'FAILURE');
+  const runPath = path.join(root, 'run.json');
+  fs.writeFileSync(runPath, `${JSON.stringify(run)}\n`);
+  const json = spawnSync(process.execPath, [path.join(__dirname, '..', 'bin', 'quality-audit-kit.js'), 'clones', runPath, '--format', 'json'], { encoding: 'utf8' });
+  assert.equal(json.status, 2, json.stderr);
+  const audit = JSON.parse(json.stdout);
+  assert.equal(audit.status, 'FAILURE');
+  assert.equal(audit.evidenceContext.scanner.measurementStatus, 'FAILURE');
+  assert.equal(audit.evidenceContext.cloneEvidence, 'FINDINGS_PRESENT_UNVERIFIED');
+  const markdown = spawnSync(process.execPath, [path.join(__dirname, '..', 'bin', 'quality-audit-kit.js'), 'clones', runPath, '--format', 'markdown'], { encoding: 'utf8' });
+  assert.equal(markdown.status, 2, markdown.stderr);
+  assert.match(markdown.stdout, /Status: `FAILURE`/);
+  assert.match(markdown.stdout, /jscpd measurement: `FAILURE`/);
+  assert.match(markdown.stdout, /CLONE_ENGINE_STATUS_CONTRADICTION/);
+  assert.deepEqual(fs.readdirSync(root), ['run.json']);
+});
+
+test('general reports do not trust a stale imported clone qualification', () => {
+  const run = runWithEngine([fixtureFinding('f-report-status', 'src/a.js', 1, 3, 'src/b.js', 10, 12)], 'FAILURE');
+  run.clones = { status: 'MEASURED', counts: { families: 1, occurrences: 2, pairs: 1 } };
+  const structured = buildStructuredReport(run);
+  assert.equal(structured.clones.status, 'FAILURE');
+  assert.equal(structured.clones.evidenceContext.scanner.measurementStatus, 'FAILURE');
+  assert.match(renderMarkdown(run), /Status: `FAILURE`/);
 });
 
 test('explicit clone annotation enables a protected review prompt export', () => {

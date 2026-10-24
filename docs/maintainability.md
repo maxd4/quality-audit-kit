@@ -75,6 +75,28 @@ The optional `--maintainability-report path.json` imports an already generated
 canonical report without running the analyzer. The imported file must contain
 `functionMeasurements` and `maintainabilityCoverage`.
 
+## Offline historical comparison
+
+Two existing canonical runs can be compared without rerunning any analyzer:
+
+```text
+quality-audit-kit trends previous-run.json current-run.json --format json
+quality-audit-kit trends previous-run.json current-run.json --format markdown --output trends.md
+quality-audit-kit report current-run.json --previous-run previous-run.json --format markdown
+```
+
+The comparison requires compatible repository identity, distinct run IDs,
+compatible input scope, a measured maintainability engine, verified source
+revisions attributed to both runs, and matching engine/metric definitions.
+Function IDs are preferred; a unique path/name/AST-role/language signature is
+the only fallback. Renames, ambiguous moves, collisions, incomplete runs and
+unverified or unknown provenance remain qualified as `NOT_COMPARABLE`. Added
+and removed functions are separate from numeric trends. Missing measurements
+are `NOT_MEASURED`; a previous zero yields a null relative delta with an
+explicit undefined-zero status. The result is informative only: it does not
+change findings, baselines, gates, ratchets or human decisions, and it never
+turns a `WORKTREE_LIVE` context SHA into proof of a committed source revision.
+
 ## Optional-adapter behavior
 
 The module API accepts an adapter allowlist. If no compatible local adapter is

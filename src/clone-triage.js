@@ -31,6 +31,8 @@ const ACTIONABLE = new Set([
   'INVESTIGATE',
 ]);
 
+const MEASUREMENT_STATUSES = new Set(['MEASURED', 'PARTIAL', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY']);
+
 function hash(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
@@ -209,6 +211,39 @@ function effortFor(family) {
   return 'HIGH';
 }
 
+function cloneMeasurementStatus(jscpdEngine, allFindings, cloneFindings, families) {
+  const declaredStatus = jscpdEngine?.measurementStatus;
+  const jscpdFindings = allFindings.filter((finding) => finding.engine === 'jscpd');
+  const hasUnenrichedJscpdFindings = jscpdFindings.some((finding) => !finding.clone || !Array.isArray(finding.clone.occurrences));
+  if (!jscpdEngine) return { status: 'INSUFFICIENT_DATA', evidence: 'UNAVAILABLE', diagnostic: { code: 'CLONE_ENGINE_MISSING', message: 'No jscpd engine measurement was declared; clone conclusions are unavailable.' } };
+  if (!MEASUREMENT_STATUSES.has(declaredStatus)) {
+    return { status: 'INSUFFICIENT_DATA', evidence: 'UNAVAILABLE', diagnostic: { code: 'CLONE_ENGINE_STATUS_UNKNOWN', message: `jscpd declared an unsupported or missing measurement status: ${declaredStatus || 'UNKNOWN'}.` } };
+  }
+  if (declaredStatus !== 'MEASURED') {
+    return {
+      status: declaredStatus,
+      evidence: cloneFindings.length ? 'FINDINGS_PRESENT_UNVERIFIED' : 'UNAVAILABLE',
+      diagnostic: cloneFindings.length
+        ? { code: 'CLONE_ENGINE_STATUS_CONTRADICTION', message: `jscpd findings are present, but the declared engine measurement status is ${declaredStatus}; clone conclusions remain ${declaredStatus}.` }
+        : null,
+    };
+  }
+  if (hasUnenrichedJscpdFindings) {
+    return {
+      status: cloneFindings.length ? 'PARTIAL' : 'INSUFFICIENT_DATA',
+      evidence: cloneFindings.length ? 'FINDINGS_PRESENT_PARTIAL' : 'UNAVAILABLE',
+      diagnostic: { code: 'CLONE_ENRICHMENT_UNAVAILABLE', message: 'One or more jscpd findings are present without clone metadata; no complete clone audit can be inferred.' },
+    };
+  }
+  if (!cloneFindings.length) {
+    return { status: 'MEASURED', evidence: 'MEASURED_ZERO', diagnostic: { code: 'CLONE_ZERO_FINDINGS', message: 'jscpd was MEASURED and produced zero clone findings; this is an explicit measured zero, not missing data.' } };
+  }
+  if (families.some((family) => family.dataAvailability !== 'COMPLETE')) {
+    return { status: 'PARTIAL', evidence: 'FINDINGS_PRESENT_PARTIAL', diagnostic: { code: 'CLONE_METADATA_INCOMPLETE', message: 'jscpd was MEASURED, but one or more clone families lack complete occurrence metadata.' } };
+  }
+  return { status: 'MEASURED', evidence: 'FINDINGS_PRESENT_COMPLETE', diagnostic: null };
+}
+
 function buildFamily(group, decisions, annotations) {
   const findings = group.findings;
   const findingIds = findings.map((finding) => finding.id).sort();
@@ -281,8 +316,7 @@ function buildCloneAudit(run, options = {}) {
   const cloneFindings = allFindings.filter((finding) => finding.engine === 'jscpd' && finding.clone && Array.isArray(finding.clone.occurrences));
   const jscpdEngine = (run?.engines || []).find((engine) => engine.name === 'jscpd');
   const diagnostics = [];
-  if (allFindings.some((finding) => finding.engine === 'jscpd') && cloneFindings.length === 0) diagnostics.push({ code: 'CLONE_ENRICHMENT_UNAVAILABLE', message: 'The input contains jscpd findings without clone metadata; no family can be safely inferred.' });
-  if (!allFindings.some((finding) => finding.engine === 'jscpd')) diagnostics.push({ code: 'CLONE_DATA_UNAVAILABLE', message: 'No jscpd measurement was present; clone conclusions are unavailable.' });
+  if (!jscpdEngine && !allFindings.some((finding) => finding.engine === 'jscpd')) diagnostics.push({ code: 'CLONE_DATA_UNAVAILABLE', message: 'No jscpd measurement was present; clone conclusions are unavailable.' });
   const groups = new Map();
   for (const finding of cloneFindings) {
     const clone = finding.clone;
@@ -297,6 +331,8 @@ function buildCloneAudit(run, options = {}) {
   const decisions = options.decisions || run?.decisions || [];
   const annotations = options.annotations || run?.cloneAnnotations || {};
   const families = [...groups.values()].map((group) => buildFamily(group, decisions, annotations)).sort((left, right) => left.id.localeCompare(right.id));
+  const measurement = cloneMeasurementStatus(jscpdEngine, allFindings, cloneFindings, families);
+  if (measurement.diagnostic && !diagnostics.some((diagnostic) => diagnostic.code === measurement.diagnostic.code)) diagnostics.push(measurement.diagnostic);
   const prompts = families.filter((family) => family.promptEligible || family.reviewPromptEligible).map((family) => ({
     familyId: family.id,
     fileName: `${family.id.replace(/[^a-z0-9-]+/gi, '-')}.md`,
@@ -307,7 +343,7 @@ function buildCloneAudit(run, options = {}) {
   return {
     schemaVersion: '0.1-draft',
     auditVersion: '0.1-draft',
-    status: cloneFindings.length ? (jscpdEngine?.measurementStatus === 'PARTIAL' ? 'PARTIAL' : 'MEASURED') : 'INSUFFICIENT_DATA',
+    status: measurement.status,
     runId: run?.runId || null,
     source: {
       repository: run?.repository?.name || null,
@@ -318,6 +354,7 @@ function buildCloneAudit(run, options = {}) {
     },
     evidenceContext: {
       scanner: jscpdEngine ? { measurementStatus: jscpdEngine.measurementStatus, gateOutcome: jscpdEngine.gateOutcome || 'NOT_EVALUATED', sourceRevision: jscpdEngine.sourceRevision || null } : { measurementStatus: 'NOT_MEASURED', gateOutcome: 'NOT_EVALUATED', sourceRevision: null },
+      cloneEvidence: measurement.evidence,
       comparison: run?.comparison ? { status: run.comparison.status || 'UNKNOWN', baselineRunId: run.comparison.baselineRunId || null } : { status: 'NOT_RECORDED', baselineRunId: null },
       history: run?.history ? 'RECORDED' : 'NOT_RECORDED',
       decisions: decisions.length ? 'SUPPLIED' : 'NOT_SUPPLIED',
@@ -342,7 +379,8 @@ function renderCloneMarkdown(audit, options = {}) {
     C: families.filter((family) => ['INTENTIONAL_DUPLICATION_CANDIDATE', 'TEXTUAL_SIMILARITY'].includes(family.qualification.category) || ['KEEP_JUSTIFIED', 'NO_ACTION_NOISE'].includes(family.recommendation)),
     D: families.filter((family) => family.dataAvailability === 'INSUFFICIENT' || family.dataAvailability === 'PARTIAL'),
   };
-  const lines = [options.title || '# Clone audit', '', `- Status: \`${audit?.status || 'UNKNOWN'}\``, `- Families: ${audit?.counts?.families || 0}`, `- Unique occurrences: ${audit?.counts?.occurrences || 0}`, `- Unique pairs: ${audit?.counts?.pairs || 0}`, '', 'jscpd similarity is not semantic proof and no gain is estimated without evidence.', ''];
+  const scanner = audit?.evidenceContext?.scanner || {};
+  const lines = [options.title || '# Clone audit', '', `- Status: \`${audit?.status || 'UNKNOWN'}\``, `- jscpd measurement: \`${scanner.measurementStatus || 'UNKNOWN'}\``, `- Clone evidence: \`${audit?.evidenceContext?.cloneEvidence || 'UNKNOWN'}\``, `- Families: ${audit?.counts?.families || 0}`, `- Unique occurrences: ${audit?.counts?.occurrences || 0}`, `- Unique pairs: ${audit?.counts?.pairs || 0}`, '', 'jscpd similarity is not semantic proof and no gain is estimated without evidence.', ''];
   for (const [letter, title] of [['A', 'Corrections à fort potentiel'], ['B', 'Revue renforcée'], ['C', 'Intentionnels/non actionnables'], ['D', 'Données insuffisantes']]) {
     lines.push(`## ${letter}. ${title}`, '', '| Family | Category | Scope | Files | Occurrences | Pairs | Recommendation | Data | Decision coverage |', '| --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |');
     if (!groups[letter].length) lines.push('None recorded.');
