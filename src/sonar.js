@@ -23,24 +23,50 @@ function normalizeUrl(value) {
   let parsed;
   try { parsed = new URL(String(value)); } catch { throw new Error('SonarQube URL must be an absolute http(s) URL.'); }
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('SonarQube URL must use http or https.');
+  if (parsed.username || parsed.password) throw new Error('SonarQube URL must not contain username or password; use a token environment variable or external token file.');
   parsed.hash = '';
   parsed.search = '';
   return parsed.toString().replace(/\/$/, '');
+}
+
+function isPathOutside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return Boolean(relative) && (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative));
 }
 
 function readToken({ root = process.cwd(), tokenEnv, tokenFile, env = process.env }) {
   if (tokenEnv && tokenFile) throw new Error('Choose either --sonar-token-env or --sonar-token-file, not both.');
   const environmentName = tokenEnv || 'SONAR_TOKEN';
   if (tokenFile) {
-    const absolute = path.resolve(tokenFile);
-    const relative = path.relative(root, absolute);
-    if (!relative || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))) throw new Error('Sonar token file must be outside the analyzed repository.');
-    const token = fs.readFileSync(absolute, 'utf8').trim();
+    let repositoryReal;
+    let tokenReal;
+    try {
+      repositoryReal = fs.realpathSync(path.resolve(root));
+      tokenReal = fs.realpathSync(path.resolve(tokenFile));
+      if (!isPathOutside(repositoryReal, tokenReal) || !fs.statSync(tokenReal).isFile()) throw new Error('invalid token file boundary');
+    } catch (error) {
+      if (error?.message === 'invalid token file boundary') throw new Error('Sonar token file must be an existing regular file outside the analyzed repository.');
+      throw new Error('Sonar token file could not be resolved safely.');
+    }
+    const token = fs.readFileSync(tokenReal, 'utf8').trim();
     if (!token) throw new Error('Sonar token file is empty.');
     return { value: token, source: 'file' };
   }
   const token = env[environmentName];
   return token ? { value: String(token), source: `environment:${environmentName}` } : { value: null, source: 'none' };
+}
+
+function redactSecrets(value, secrets) {
+  if (typeof value === 'string') {
+    return secrets.filter(Boolean).reduce((result, secret) => result.split(secret).join('[REDACTED_TOKEN]'), value);
+  }
+  if (Array.isArray(value)) return value.map((item) => redactSecrets(item, secrets));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSecrets(item, secrets)]));
+  return value;
+}
+
+function safeDiagnostic(error, fallback) {
+  return error instanceof SonarHttpError ? error.message : fallback;
 }
 
 function versionProfile(version) {
@@ -70,13 +96,18 @@ function createClient({ url, token, request = defaultRequest, timeoutMs }) {
   async function get(pathname, params = {}) {
     const parsed = new URL(`${baseUrl}${pathname}`);
     for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== null && value !== '') parsed.searchParams.set(key, String(value));
-    const response = await request({
-      url: parsed.toString(),
-      pathname,
-      query: { ...params },
-      headers: { accept: 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-      timeoutMs,
-    });
+    let response;
+    try {
+      response = await request({
+        url: parsed.toString(),
+        pathname,
+        query: { ...params },
+        headers: { accept: 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        timeoutMs,
+      });
+    } catch {
+      throw new Error('SonarQube API request failed before a response was received.');
+    }
     if (!response || response.status < 200 || response.status >= 300) {
       const status = response?.status || 0;
       const message = status === 401 || status === 403 ? 'authentication or permission was insufficient' : 'server returned an unsuccessful response';
@@ -132,7 +163,7 @@ async function fetchIssues(client, { project, branch, pullRequest, maxResults = 
     }
   } catch (error) {
     if (findings.length) {
-      diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'PARTIAL_API_RESPONSE', reference: '/api/issues/search', message: error.message });
+      diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'PARTIAL_API_RESPONSE', reference: '/api/issues/search', message: safeDiagnostic(error, 'SonarQube API request failed before a complete page was imported.') });
       return { issues: findings, total, status: 'PARTIAL', diagnostics };
     }
     throw error;
@@ -165,13 +196,13 @@ async function importSonar(root, options = {}) {
   try {
     analysis = await latestAnalysis(client, options.project, branch, pullRequest);
   } catch (error) {
-    analysisDiagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'ANALYSIS_METADATA_UNAVAILABLE', reference: '/api/project_analyses/search', message: error.message });
+    analysisDiagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'ANALYSIS_METADATA_UNAVAILABLE', reference: '/api/project_analyses/search', message: safeDiagnostic(error, 'SonarQube analysis metadata could not be imported completely.') });
   }
   const sourceRevision = analysisRevision(analysis);
   if (options.revision && sourceRevision.sha && String(options.revision).toLowerCase() !== sourceRevision.sha) throw new Error('The requested SonarQube revision does not match the latest analysis revision; refusing to attribute findings to another revision.');
   const status = issueResult.status === 'MEASURED' && analysisDiagnostics.length ? 'PARTIAL' : issueResult.status;
   const normalized = normalizeSonar(root, issueResult.issues, { kind: 'REPORT', reference: `sonarqube://${options.project}`, sourceRevision, measurementStatus: status });
-  return {
+  return redactSecrets({
     version,
     apiProfile: versionProfile(version),
     project: options.project,
@@ -200,7 +231,7 @@ async function importSonar(root, options = {}) {
       },
       diagnostic: issueResult.diagnostics.length + analysisDiagnostics.length ? `${issueResult.diagnostics.length + analysisDiagnostics.length} SonarQube diagnostic(s) were retained; the imported measure is not complete.` : undefined,
     },
-  };
+  }, [token.value]);
 }
 
 module.exports = { DEFAULT_MAX_RESULTS, MAX_RESULTS_LIMIT, SonarHttpError, connectSonar, createClient, fetchIssues, importSonar, normalizeUrl, readToken, versionProfile };

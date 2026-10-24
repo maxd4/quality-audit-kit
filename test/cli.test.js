@@ -9,7 +9,7 @@ const { createDeterministicAdapter } = require('../src/agents');
 const { classifyExecution, compareSnapshots, executeFix, runValidations, validateLot, verifyFixResult } = require('../src/fix');
 const { buildPlan, nextLot } = require('../src/planner');
 const { buildSarif, importSarifFile } = require('../src/sarif');
-const { connectSonar, importSonar } = require('../src/sonar');
+const { connectSonar, importSonar, normalizeUrl, readToken } = require('../src/sonar');
 const { buildStructuredReport, createBundle, createZip, readZipEntries, validateRun, verifyBundle } = require('../src/report');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -1536,6 +1536,7 @@ test('SonarQube connector detects version, paginates and keeps analysis revision
     assert.equal(connected.status, 'CONNECTED');
     assert.equal(connected.version, '10.6.0.92116');
     assert.equal(connected.tokenSource, 'environment:QAK_TEST_TOKEN');
+    assert.doesNotMatch(JSON.stringify(connected), /secret-token-value/);
     const imported = await importSonar(repository, { url: 'https://sonar.example.invalid', project: 'sonar-fixture', branch: 'main', tokenEnv: 'QAK_TEST_TOKEN', env: { QAK_TEST_TOKEN: 'secret-token-value' }, request });
     assert.equal(imported.status, 'MEASURED');
     assert.equal(imported.findings.length, 3);
@@ -1547,8 +1548,36 @@ test('SonarQube connector detects version, paginates and keeps analysis revision
     assert.equal(calls.find((call) => call.pathname === '/api/issues/search').headers.authorization, 'Bearer secret-token-value');
     assert.equal(imported.findings.some((finding) => finding.provenance.sourceRevision.sha === 'a'.repeat(40)), false);
     assert.equal(imported.findings.every((finding) => !String(finding.message).includes('secret-token-value')), true);
+    assert.doesNotMatch(JSON.stringify(imported), /secret-token-value/);
   } finally {
     cleanup(repository);
+  }
+});
+
+test('SonarQube connector rejects URL credentials and enforces the physical token-file boundary', () => {
+  const repository = makeEmptyRepository();
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'quality-audit-kit-sonar-token-'));
+  try {
+    assert.equal(normalizeUrl('https://sonar.example.invalid/'), 'https://sonar.example.invalid');
+    assert.throws(() => normalizeUrl('https://user:password@sonar.example.invalid'), (error) => {
+      assert.doesNotMatch(error.message, /user:|password@|sonar\.example\.invalid/);
+      return /must not contain username or password/.test(error.message);
+    });
+
+    const externalToken = path.join(outside, 'token.txt');
+    fs.writeFileSync(externalToken, 'external-fixture-token\n');
+    assert.equal(readToken({ root: repository, tokenFile: externalToken }).source, 'file');
+
+    const internalToken = path.join(repository, 'token.txt');
+    fs.writeFileSync(internalToken, 'internal-fixture-token\n');
+    assert.throws(() => readToken({ root: repository, tokenFile: internalToken }), /outside the analyzed repository/);
+
+    const inwardLink = path.join(outside, 'token-link.txt');
+    fs.symlinkSync(internalToken, inwardLink, 'file');
+    assert.throws(() => readToken({ root: repository, tokenFile: inwardLink }), /outside the analyzed repository/);
+  } finally {
+    cleanup(repository);
+    cleanup(outside);
   }
 });
 
@@ -1565,7 +1594,12 @@ test('SonarQube connector preserves limits and permission errors without claimin
     assert.equal(partial.status, 'PARTIAL');
     assert.equal(partial.engine.measurementStatus, 'PARTIAL');
     assert.ok(partial.diagnostics.some((item) => item.code === 'RESULT_LIMIT_REACHED'));
-    await assert.rejects(() => importSonar(repository, { url: 'https://sonar.example.invalid', project: 'p', request: async ({ pathname }) => pathname === '/api/server/version' ? { status: 200, body: '10.0' } : { status: 403, body: '{"errors":[{"msg":"Insufficient permissions"}]}' } }), /HTTP 403/);
+    const secret = 'permission-fixture-token';
+    await assert.rejects(() => importSonar(repository, { url: 'https://sonar.example.invalid', project: 'p', tokenEnv: 'QAK_PERMISSION_TOKEN', env: { QAK_PERMISSION_TOKEN: secret }, request: async ({ pathname }) => pathname === '/api/server/version' ? { status: 200, body: '10.0' } : { status: 403, body: '{"errors":[{"msg":"Insufficient permissions"}]}' } }), (error) => {
+      assert.match(error.message, /HTTP 403/);
+      assert.doesNotMatch(error.message, new RegExp(secret));
+      return true;
+    });
   } finally {
     cleanup(repository);
   }
