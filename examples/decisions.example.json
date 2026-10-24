@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "0.1-draft",
+  "decisions": [
+    {
+      "findingId": "knip:unused-export:demo/src/utils.ts:helper",
+      "decision": "KEEP_JUSTIFIED",
+      "reason": "Entirely fictional example: public plugin contract requires retaining this export; must be re-reviewed on real code.",
+      "reviewer": "example-reviewer",
+      "reviewedRevision": "0123456789abcdef0123456789abcdef01234567",
+      "reviewAfter": "2027-01-01",
+      "evidence": [
+        {
+          "type": "UNKNOWN",
+          "reference": "fictional-example-no-real-proof",
+          "outcome": "UNKNOWN"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/quality-audit-kit/triage-decision.schema.json",
+  "title": "Quality Audit Kit draft triage decision",
+  "description": "DESIGN v0.1: not a published stable API.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "decisions"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "0.1-draft"
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "findingId",
+          "decision",
+          "reason",
+          "reviewer",
+          "reviewedRevision",
+          "evidence"
+        ],
+        "properties": {
+          "findingId": {
+            "type": "string",
+            "minLength": 8
+          },
+          "decision": {
+            "enum": [
+              "FIX",
+              "MIGRATE",
+              "INTERNALIZE",
+              "RESTORE_FUNCTIONALITY",
+              "KEEP_JUSTIFIED",
+              "DEFER",
+              "FALSE_POSITIVE"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reviewer": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reviewedRevision": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{40}$"
+          },
+          "reviewAfter": {
+            "type": "string",
+            "format": "date"
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "reference",
+                "outcome"
+              ],
+              "properties": {
+                "type": {
+                  "enum": [
+                    "SOURCE_INSPECTION",
+                    "STATIC_CONTRACT",
+                    "EXECUTED_BEHAVIOR",
+                    "INTEGRATION_PROOF",
+                    "UNKNOWN"
+                  ]
+                },
+                "reference": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "outcome": {
+                  "enum": [
+                    "PASS",
+                    "FAIL",
+                    "UNKNOWN"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

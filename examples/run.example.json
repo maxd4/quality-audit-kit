@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "0.1-draft",
+  "runId": "example-run-0001",
+  "repository": {
+    "name": "fictional-demo-repo",
+    "commitSha": "0123456789abcdef0123456789abcdef01234567",
+    "sourceScopeDescription": "Synthetic immutable example; no actual Git repository was audited."
+  },
+  "inputScope": "COMMITTED_SNAPSHOT",
+  "reproducible": false,
+  "generatedAt": "2026-10-24T12:00:00Z",
+  "engines": [
+    {
+      "name": "fictional-knip",
+      "version": "example",
+      "measurementStatus": "MEASURED",
+      "gateOutcome": "INFORMATIVE",
+      "scope": "demo/src"
+    },
+    {
+      "name": "fictional-cycle-check",
+      "version": "example",
+      "measurementStatus": "SKIPPED_BY_POLICY",
+      "gateOutcome": "NOT_EVALUATED",
+      "diagnostic": "Synthetic demonstration of skipped measurement."
+    }
+  ],
+  "findings": [
+    {
+      "id": "knip:unused-export:demo/src/utils.ts:helper",
+      "engine": "fictional-knip",
+      "ruleId": "unused-export",
+      "path": "demo/src/utils.ts",
+      "line": 8,
+      "severity": "LOW",
+      "message": "Synthetic example: helper appears unused.",
+      "lifecycle": "HISTORICAL_JUSTIFIED",
+      "rawReference": "synthetic-knip.json#finding-1"
+    }
+  ]
+}

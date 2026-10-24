@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/quality-audit-kit/audit-run.schema.json",
+  "title": "Quality Audit Kit draft audit run",
+  "description": "DESIGN v0.1: not a published stable API.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "runId",
+    "repository",
+    "inputScope",
+    "reproducible",
+    "engines",
+    "findings"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "0.1-draft"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{8,80}$"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commitSha": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-fA-F0-9]{40}$"
+        },
+        "sourceScopeDescription": {
+          "type": "string"
+        }
+      }
+    },
+    "inputScope": {
+      "enum": [
+        "COMMITTED_SNAPSHOT",
+        "STAGED",
+        "WORKTREE_LIVE"
+      ]
+    },
+    "reproducible": {
+      "type": "boolean"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "engines": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "measurementStatus",
+          "gateOutcome"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "string"
+          },
+          "measurementStatus": {
+            "enum": [
+              "MEASURED",
+              "NOT_MEASURED",
+              "FAILURE",
+              "SKIPPED_BY_POLICY"
+            ]
+          },
+          "gateOutcome": {
+            "enum": [
+              "PASS",
+              "FAIL",
+              "INFORMATIVE",
+              "NOT_EVALUATED"
+            ]
+          },
+          "diagnostic": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "engine",
+          "ruleId",
+          "path",
+          "severity",
+          "message",
+          "lifecycle"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 8
+          },
+          "engine": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ruleId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "severity": {
+            "enum": [
+              "INFO",
+              "LOW",
+              "MEDIUM",
+              "HIGH",
+              "CRITICAL"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "lifecycle": {
+            "enum": [
+              "NEW",
+              "HISTORICAL_ACTIONABLE",
+              "HISTORICAL_JUSTIFIED",
+              "RESOLVED",
+              "REINTRODUCED"
+            ]
+          },
+          "rawReference": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
