@@ -93,6 +93,12 @@ Each proposal has separate current measurement, recommended objective and histor
 
 ## Draft files
 
+## Correction execution boundary
+
+Correction execution is not a generic sandbox. The executable allowlist is physically resolved and rejects symbolic links, missing files and destinations outside the repository. The built-in deterministic adapter enforces that boundary; Codex and command adapters declare no strong cross-platform confinement and are refused before execution. Git status plus a repository filesystem snapshot observe tracked, untracked and ignored files, but external effects remain `NOT_OBSERVABLE` and are never reported as absent.
+
+Validation scripts are separate from agent confinement. A script name is not a safety guarantee. Automatic validation requires explicit `--authorize-validation`, an exact SHA-256 of the current package script and this declaration under `package.json`: `qualityAuditKit.validationPolicy.scripts.<name>.effects` with `read: repository`, `write: none`, `network: none`, `external: none` and `subprocesses: declared-only`. Known writes, network commands, repository mutations and shell redirections are refused. Authorized validations remain declaration-plus-post-audit evidence, not a proof of absence of external effects.
+
 - [`audit-run.schema.json`](../schemas/audit-run.schema.json)
 - [`triage-decision.schema.json`](../schemas/triage-decision.schema.json)
 - [`plan.schema.json`](../schemas/plan.schema.json)

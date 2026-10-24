@@ -24,7 +24,7 @@ const {
 } = require('./report');
 const { buildPlan, nextLot, renderPlanMarkdown } = require('./planner');
 const { buildThresholdConfig, recommendThresholds, renderThresholdsMarkdown } = require('./thresholds');
-const { executeFix, verifyFixResult } = require('./fix');
+const { executeFix, runValidations, verifyFixResult } = require('./fix');
 const { buildSarif, importSarifFile } = require('./sarif');
 const { connectSonar, importSonar } = require('./sonar');
 const {
@@ -891,12 +891,15 @@ async function fixCommand(positional, options) {
   const plan = loadPlanOrCreate(planPath, options);
   const next = nextLot(plan);
   const target = findRepositoryRoot(options.repository || path.dirname(planPath));
+  const authorizedValidations = String(options['authorize-validation'] || options.validate || '').split(',').map((name) => name.trim()).filter(Boolean);
   const result = await executeFix({
     plan,
     next,
     root: target,
     agentName: options.agent || 'codex',
     agentOptions: { command: options['codex-command'] || options['agent-command'] },
+    validationOptions: { authorizedNames: authorizedValidations },
+    validate: (root) => runValidations(root, { authorizedNames: authorizedValidations }),
     execute: options.execute === true,
     approve: options.execute === true && options.approve === true,
   });
@@ -1161,7 +1164,7 @@ function printThresholdsHelp() {
 }
 
 function printFixHelp() {
-  process.stdout.write('\nFix and verify usage:\n  quality-audit-kit fix --next [plan.json] [--output fix-result.json]\n  quality-audit-kit fix --next [plan.json] --execute --approve [--agent codex|command|deterministic] [--codex-command executable]\n  quality-audit-kit verify fix-result.json [--output verification.json]\n\nfix --next is read-only by default and presents the next bounded lot. Agent execution requires both --execute and --approve. The agent receives an allowlist from the plan; commits, pushes, deletions, baseline changes, policy changes and writes outside the allowlist are prohibited and audited. verify checks only the redacted execution evidence and never runs an agent.\n');
+  process.stdout.write('\nFix and verify usage:\n  quality-audit-kit fix --next [plan.json] [--output fix-result.json]\n  quality-audit-kit fix --next [plan.json] --execute --approve [--agent codex|command|deterministic] [--codex-command executable] [--authorize-validation name[,name]]\n  quality-audit-kit verify fix-result.json [--output verification.json]\n\nfix --next is read-only by default and presents the next bounded lot. Agent execution requires both --execute and --approve. Only an adapter declaring strong physical confinement may execute; the built-in Codex and command adapters are refused without such a mechanism. The agent receives a physical no-symlink allowlist; commits, pushes, deletions, baseline changes, policy changes and writes outside the allowlist are prohibited and audited. Validation scripts are never trusted by name: each must be explicitly authorized and declared in package.json. verify checks only the redacted execution evidence and never runs an agent.\n');
 }
 
 function printConnectorHelp() {

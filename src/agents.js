@@ -40,7 +40,7 @@ function createCodexAdapter(options = {}) {
   return {
     name: 'codex',
     protocolVersion: AGENT_PROTOCOL_VERSION,
-    capabilities: { boundedWorkspaceWrite: true, commits: false, pushes: false, baselineMutation: false },
+    capabilities: { boundedWorkspaceWrite: false, strongWorkspaceConfinement: false, externalEffects: 'NOT_OBSERVABLE', commits: false, pushes: false, baselineMutation: false },
     async execute({ root, prompt }) {
       const lastMessage = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'quality-audit-kit-codex-')), 'last-message.txt');
       try {
@@ -70,7 +70,7 @@ function createCommandAdapter(name, command) {
   return {
     name,
     protocolVersion: AGENT_PROTOCOL_VERSION,
-    capabilities: { boundedWorkspaceWrite: false, commits: false, pushes: false, baselineMutation: false },
+    capabilities: { boundedWorkspaceWrite: false, strongWorkspaceConfinement: false, externalEffects: 'NOT_OBSERVABLE', commits: false, pushes: false, baselineMutation: false },
     async execute({ root, prompt }) {
       const result = await runProcess(command, [], root, prompt);
       return { ...result, command };
@@ -82,11 +82,16 @@ function createDeterministicAdapter() {
   return {
     name: 'deterministic-test-agent',
     protocolVersion: AGENT_PROTOCOL_VERSION,
-    capabilities: { boundedWorkspaceWrite: true, commits: false, pushes: false, baselineMutation: false },
-    async execute({ root, allowedFiles }) {
+    capabilities: { boundedWorkspaceWrite: true, strongWorkspaceConfinement: true, externalEffects: 'NONE', commits: false, pushes: false, baselineMutation: false },
+    async execute({ root, allowedFiles, allowedPhysicalFiles = {} }) {
       let changed = 0;
       for (const relative of allowedFiles) {
-        const filePath = path.join(root, relative.split('/').join(path.sep));
+        const filePath = allowedPhysicalFiles[relative] || path.join(root, relative.split('/').join(path.sep));
+        try {
+          if (!fs.lstatSync(filePath).isFile() || fs.realpathSync(filePath) !== filePath) throw new Error(`Physical allowlist changed for ${relative}.`);
+        } catch (error) {
+          return { status: 'FAILED', exitCode: null, stdout: '', stderr: error.message, command: 'deterministic-test-agent' };
+        }
         if (!fs.existsSync(filePath)) continue;
         const before = fs.readFileSync(filePath, 'utf8');
         const after = before.replace(/QAK_FIX_ME/g, 'QAK_FIXED');

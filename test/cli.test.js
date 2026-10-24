@@ -1,11 +1,12 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 const { createDeterministicAdapter } = require('../src/agents');
-const { classifyExecution, executeFix, verifyFixResult } = require('../src/fix');
+const { classifyExecution, compareSnapshots, executeFix, runValidations, validateLot, verifyFixResult } = require('../src/fix');
 const { buildPlan, nextLot } = require('../src/planner');
 const { buildSarif, importSarifFile } = require('../src/sarif');
 const { connectSonar, importSonar } = require('../src/sonar');
@@ -1296,6 +1297,153 @@ test('fix refuses to overwrite a pre-existing approved change and verify rejects
     assert.match(result.reason, /pre-existing changes/);
     assert.equal(fs.readFileSync(path.join(repository, 'src', 'fix-target.js'), 'utf8'), 'module.exports = "human-change";\n');
     assert.equal(verifyFixResult({ ...result, mode: 'EXECUTION' }).verified, false);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('fix enforces physical allowlists and observes ignored repository mutations separately from Git', async () => {
+  const repository = makeRepository('fix-boundary-fixture');
+  try {
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(repository, 'src', 'allowed.js'), 'module.exports = "QAK_FIX_ME";\n');
+    initializeGit(repository);
+    const run = measuredRun({ runId: 'fix-boundary-0001', seed: 'b', findings: [{ id: 'fix-boundary-target', path: 'src/allowed.js', message: 'fixture' }] });
+    run.findings[0].lifecycle = 'NEW';
+    const plan = buildPlan(run);
+    const normal = await executeFix({
+      plan,
+      next: nextLot(plan),
+      root: repository,
+      agentName: 'deterministic',
+      approve: true,
+      adapter: createDeterministicAdapter(),
+      reanalyze: async () => ({ status: 'MEASURED_VERIFIED', sourceRevisionStatus: 'VERIFIED', remainingFindings: [] }),
+      validate: () => ({ status: 'PASS', validations: [] }),
+    });
+    assert.equal(normal.status, 'RESOLVED');
+    assert.deepEqual(normal.scopeAudit.allowedChanges, ['src/allowed.js']);
+    assert.equal(normal.scopeAudit.confinement.repositoryFilesystem, 'OBSERVED');
+    assert.equal(normal.executionBoundary.externalPaths, 'NOT_APPLICABLE');
+  } finally {
+    cleanup(repository);
+  }
+
+  const symlinkRepository = makeRepository('fix-symlink-boundary-fixture');
+  const outsidePath = path.join(path.dirname(symlinkRepository), `${path.basename(symlinkRepository)}-outside.js`);
+  try {
+    fs.mkdirSync(path.join(symlinkRepository, 'src'), { recursive: true });
+    fs.writeFileSync(outsidePath, 'module.exports = "outside";\n');
+    fs.symlinkSync(outsidePath, path.join(symlinkRepository, 'src', 'allowed.js'), 'file');
+    initializeGit(symlinkRepository);
+    const run = measuredRun({ runId: 'fix-boundary-0002', seed: 's', findings: [{ id: 'fix-symlink-target', path: 'src/allowed.js', message: 'symlink fixture' }] });
+    run.findings[0].lifecycle = 'NEW';
+    const plan = buildPlan(run);
+    const checked = validateLot(symlinkRepository, nextLot(plan).lot);
+    assert.equal(checked.status, 'BLOCKED');
+    assert.match(checked.reason, /symbolic|allowlist|boundary/i);
+    const beforeOutside = fs.readFileSync(outsidePath, 'utf8');
+    const refused = await executeFix({ plan, next: nextLot(plan), root: symlinkRepository, agentName: 'deterministic', approve: true, adapter: createDeterministicAdapter(), reanalyze: async () => ({ status: 'MEASURED_VERIFIED' }), validate: () => ({ status: 'PASS', validations: [] }) });
+    assert.equal(refused.status, 'BLOCKED');
+    assert.equal(fs.readFileSync(outsidePath, 'utf8'), beforeOutside);
+  } finally {
+    cleanup(symlinkRepository);
+    try { fs.rmSync(outsidePath, { force: true }); } catch { /* cleanup only */ }
+  }
+
+  const observationRepository = makeRepository('fix-observation-boundary-fixture');
+  const externalMutation = path.join(path.dirname(observationRepository), `${path.basename(observationRepository)}-external.txt`);
+  try {
+    fs.mkdirSync(path.join(observationRepository, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(observationRepository, 'src', 'allowed.js'), 'module.exports = "QAK_FIX_ME";\n');
+    fs.writeFileSync(path.join(observationRepository, 'src', 'other.js'), 'module.exports = "other";\n');
+    initializeGit(observationRepository);
+    const run = measuredRun({ runId: 'fix-boundary-0003', seed: 'o', findings: [{ id: 'fix-observation-target', path: 'src/allowed.js', message: 'observation fixture' }] });
+    run.findings[0].lifecycle = 'NEW';
+    const plan = buildPlan(run);
+    const adapter = {
+      name: 'test-writer',
+      protocolVersion: '0.1-draft',
+      capabilities: { strongWorkspaceConfinement: true },
+      async execute({ root }) {
+        fs.writeFileSync(path.join(root, 'src', 'other.js'), 'module.exports = "foreign";\n');
+        fs.writeFileSync(path.join(root, 'ignored-by-git.txt'), 'ignored mutation\n');
+        fs.writeFileSync(externalMutation, 'external mutation\n');
+        return { status: 'COMPLETED', exitCode: 0, stdout: '', stderr: '', command: 'test-writer' };
+      },
+    };
+    const result = await executeFix({ plan, next: nextLot(plan), root: observationRepository, approve: true, adapter, reanalyze: async () => ({ status: 'MEASURED_VERIFIED' }), validate: () => ({ status: 'PASS', validations: [] }) });
+    assert.equal(result.status, 'FAILED');
+    assert(result.scopeAudit.foreignChanges.some((change) => change.path === 'ignored-by-git.txt'));
+    assert(result.scopeAudit.foreignChanges.some((change) => change.path === 'src/other.js'));
+    assert.equal(result.executionBoundary.status, 'REPOSITORY_BOUNDARY_OBSERVED_ONLY');
+    assert.equal(result.executionBoundary.externalPaths, 'NOT_OBSERVABLE');
+    assert.equal(result.scopeAudit.confinement.externalPaths, 'NOT_OBSERVABLE');
+    assert.equal(fs.readFileSync(externalMutation, 'utf8'), 'external mutation\n');
+    assert.equal(verifyFixResult(result).verified, false);
+  } finally {
+    cleanup(observationRepository);
+    try { fs.rmSync(externalMutation, { force: true }); } catch { /* cleanup only */ }
+  }
+
+  const failureRepository = makeRepository('fix-agent-failure-fixture');
+  try {
+    fs.mkdirSync(path.join(failureRepository, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(failureRepository, 'src', 'allowed.js'), 'module.exports = "QAK_FIX_ME";\n');
+    initializeGit(failureRepository);
+    const run = measuredRun({ runId: 'fix-boundary-0004', seed: 'e', findings: [{ id: 'fix-agent-failure', path: 'src/allowed.js', message: 'failure fixture' }] });
+    run.findings[0].lifecycle = 'NEW';
+    const plan = buildPlan(run);
+    const result = await executeFix({
+      plan,
+      next: nextLot(plan),
+      root: failureRepository,
+      approve: true,
+      adapter: {
+        name: 'interrupting-agent',
+        protocolVersion: '0.1-draft',
+        capabilities: { strongWorkspaceConfinement: true },
+        async execute() { throw new Error('agent interrupted'); },
+      },
+      reanalyze: async () => ({ status: 'MEASURED_VERIFIED' }),
+      validate: () => ({ status: 'PASS', validations: [] }),
+    });
+    assert.equal(result.status, 'FAILED');
+    assert.equal(result.execution.status, 'FAILED');
+    assert.match(result.execution.stderr, /interrupted/);
+  } finally {
+    cleanup(failureRepository);
+  }
+});
+
+test('fix validations require explicit effect declarations and reject known mutation or network scripts', () => {
+  const repository = makeRepository('fix-validation-policy-fixture');
+  try {
+    const packagePath = path.join(repository, 'package.json');
+    const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    packageJson.scripts.test = "node -e \"require('fs').writeFileSync('forbidden.txt','x')\"";
+    const scriptHash = (script) => crypto.createHash('sha256').update(script).digest('hex');
+    packageJson.qualityAuditKit = { validationPolicy: { scripts: { test: { scriptSha256: scriptHash(packageJson.scripts.test), effects: { read: 'repository', write: 'none', network: 'none', external: 'none', subprocesses: 'declared-only' } } } } };
+    fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+    const withoutAuthorization = runValidations(repository);
+    assert.equal(withoutAuthorization.status, 'BLOCKED');
+    assert.equal(withoutAuthorization.authorization.received, false);
+    assert.equal(fs.existsSync(path.join(repository, 'forbidden.txt')), false);
+
+    const forbidden = runValidations(repository, { authorizedNames: ['test'] });
+    assert.equal(forbidden.status, 'BLOCKED');
+    assert.equal(forbidden.invalidDeclarations[0].forbiddenEffect, 'filesystem mutation');
+    assert.equal(fs.existsSync(path.join(repository, 'forbidden.txt')), false);
+
+    packageJson.scripts.test = "node -e \"process.stdout.write('authorized')\"";
+    packageJson.qualityAuditKit.validationPolicy.scripts.test.scriptSha256 = scriptHash(packageJson.scripts.test);
+    fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+    const authorized = runValidations(repository, { authorizedNames: ['test'] });
+    assert.equal(authorized.status, 'PASS');
+    assert.equal(authorized.authorization.received, true);
+    assert.equal(authorized.effectBoundary, 'DECLARED_ONLY_POST_AUDIT');
+    assert.equal(authorized.externalEffects, 'NOT_OBSERVABLE');
+    assert.equal(authorized.validations[0].status, 'PASS');
   } finally {
     cleanup(repository);
   }
