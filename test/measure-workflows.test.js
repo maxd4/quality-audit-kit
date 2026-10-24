@@ -137,6 +137,19 @@ test('target aliases are treated as one repository, not two independent measurem
     const alias = path.join(repository, '..', path.basename(repository));
     assert.equal(pathKey(repository), pathKey(alias));
     assert.equal(pathKey(repository), pathKey(fs.realpathSync(repository)));
+    const harness = spawnSync(process.execPath, [
+      path.join(ROOT, 'tools', 'measure-workflows.js'),
+      '--target',
+      repository,
+      '--target',
+      alias,
+      '--sarif',
+      SARIF,
+    ], { cwd: ROOT, encoding: 'utf8', windowsHide: true });
+    assert.equal(harness.status, 2, harness.stderr);
+    const payload = JSON.parse(harness.stdout);
+    assert.equal(payload.status, 'FAILURE');
+    assert.equal(payload.results[1].diagnostics[0].code, 'DUPLICATE_TARGET');
   } finally {
     removeRepository(repository);
   }
