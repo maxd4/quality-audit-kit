@@ -61,7 +61,7 @@ node bin/quality-audit-kit.js scan /path/to/repository --run=knip,jscpd --output
 node bin/quality-audit-kit.js report run.json
 ```
 
-`init` writes an explicit `quality-audit-kit.config.json` in the target repository. `scan` writes JSON to stdout unless `--output` is provided, and does not modify analyzed source files. Existing `knip-report.json` and `jscpd-report.json` files are imported automatically; `--run` executes only locally installed scanner binaries and never installs dependencies. An absent, skipped or failed scanner remains visible as `NOT_MEASURED` or `FAILURE`; it is never treated as a clean result. See [CLI usage and contracts](docs/cli.md).
+`init` writes an explicit `quality-audit-kit.config.json` and creates generic, protected `PROJECT_HANDOFF.md` and `COMMIT_REVIEW.md` templates in the target repository. It detects actual files, configurations, documentation, tests and rules; unproven fields remain `UNKNOWN`. Re-running `init` is safe: existing documents are protected, while `--update-templates --preview` shows a deterministic diff and `--update-templates` refreshes only managed generated blocks. `context refresh` updates only stale detected facts and controls, preserves human decisions and reports contradictions instead of rewriting instructions. `--agent codex` prepares an optional, explicit Codex customization handoff; the CLI never executes an agent or installs dependencies implicitly. `scan` writes JSON to stdout unless `--output` is provided, and does not modify analyzed source files. Existing `knip-report.json` and `jscpd-report.json` files are imported automatically; `--run` executes only locally installed scanner binaries and never installs dependencies. An absent, skipped or failed scanner remains visible as `NOT_MEASURED` or `FAILURE`; it is never treated as a clean result. See [CLI usage and contracts](docs/cli.md).
 
 ## Read the project
 
@@ -69,6 +69,8 @@ node bin/quality-audit-kit.js report run.json
 - [Landscape and alternatives](docs/landscape.md)
 - [Proposed architecture](docs/architecture.md)
 - [Draft data contracts](docs/contracts.md)
+- [CLI usage and contracts](docs/cli.md)
+- [Initialization templates](docs/templates.md)
 - [MVP specification](docs/mvp.md)
 - [Roadmap and exit criteria](docs/roadmap.md)
 - [Evaluation protocol](docs/evaluation.md)

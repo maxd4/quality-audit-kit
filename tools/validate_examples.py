@@ -31,14 +31,23 @@ def main():
         assert status in run_schema["properties"]["engines"]["items"]["properties"]["measurementStatus"]["enum"]
         if status != "MEASURED":
             assert engine_outcomes[name] != "PASS", "unmeasured engine cannot pass"
+    lifecycle_values = run_schema["properties"]["findings"]["items"]["properties"]["lifecycle"]["enum"]
+    assert "UNCLASSIFIED" in lifecycle_values
+    for engine in run["engines"]:
+        source_revision = engine["sourceRevision"]
+        assert source_revision["status"] in {"VERIFIED", "UNVERIFIED", "UNKNOWN"}
+        if source_revision["status"] == "UNKNOWN":
+            assert source_revision["sha"] is None
     ids = {finding["id"] for finding in run["findings"]}
     assert len(ids) == len(run["findings"]), "duplicate finding ID"
     assert all(f["engine"] in measurement_statuses for f in run["findings"])
     for finding in run["findings"]:
         assert measurement_statuses[finding["engine"]] == "MEASURED", "finding without measured engine"
         assert finding["measurementStatus"] == "MEASURED", "finding measurement status mismatch"
+        assert finding["lifecycle"] in lifecycle_values
         assert finding["provenance"]["kind"] in {"REPORT", "EXECUTION"}
         assert finding["provenance"]["reference"]
+        assert finding["provenance"]["sourceRevision"]["status"] in {"VERIFIED", "UNVERIFIED", "UNKNOWN"}
         assert not finding["path"].startswith("/"), "must use repo-relative path"
     for decision in decisions["decisions"]:
         assert decision["findingId"] in ids, "orphan synthetic decision"

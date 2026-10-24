@@ -1,6 +1,6 @@
 # Proposed architecture
 
-**Status:** EXPERIMENTAL SKELETON. The CLI runner, discovery, normalizers and report renderer are implemented; broader package boundaries remain target architecture.
+**Status:** EXPERIMENTAL SKELETON. The CLI runner, repository discovery, protected Markdown template generator, normalizers and report renderer are implemented; broader package boundaries remain target architecture.
 
 ```text
 quality-audit-kit/
@@ -18,7 +18,7 @@ quality-audit-kit/
   .github/workflows/
 ```
 
-The initial repository contains only documentation, schemas, fictional fixtures and checks. Create packages when a working boundary is justified; do not scaffold empty implementations.
+The initial repository contains documentation, schemas, fictional fixtures, checks and a small executable Node.js package. Create packages when a working boundary is justified; do not scaffold empty implementations.
 
 ## Flow and ownership
 

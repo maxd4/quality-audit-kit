@@ -25,9 +25,9 @@ Each finding has:
 
 - `id`: deterministic, namespaced fingerprint from stable canonical input;
 - `engine`, `ruleId`, `path`, `severity`, `message`;
-- `lifecycle`: `NEW`, `HISTORICAL_ACTIONABLE`, `HISTORICAL_JUSTIFIED`, `RESOLVED` or `REINTRODUCED`;
+- `lifecycle`: `UNCLASSIFIED` until a baseline/comparison qualifies the finding, then `NEW`, `HISTORICAL_ACTIONABLE`, `HISTORICAL_JUSTIFIED`, `RESOLVED` or `REINTRODUCED`;
 - `measurementStatus`: the engine evidence state for this finding;
-- `provenance`: whether the finding came from an imported report or an explicit scanner execution, with a report/command reference;
+- `provenance`: whether the finding came from an imported report or an explicit scanner execution, with a report/command reference and optional source-revision evidence;
 - source location and an optional `rawReference` to recover original evidence;
 - optional original engine fingerprint, never assumed globally unique.
 
@@ -60,7 +60,9 @@ Evidence must carry its producer, scope, revision or artifact reference and outc
 - New/reintroduced findings can be gated; historical ones remain reportable and triageable.
 - A missing engine result leaves comparison `NOT_EVALUATED`, not `RESOLVED`.
 - Ratchet exceptions have a rationale and bounded review conditions.
-- No new finding can be granted historical status merely to pass a gate.
+- A first observation without a comparison remains `UNCLASSIFIED`; `NEW` requires an actual comparison against a qualifying baseline or history.
+- The repository `commitSha`/`contextCommitSha` identifies Git context, not automatically the revision analyzed by an imported report. Each engine measurement carries independent `sourceRevision` evidence with `VERIFIED`, `UNVERIFIED` or `UNKNOWN` status.
+- A valid JSON payload from a failed scanner process is not a complete measurement unless the exit code is an expected findings/threshold code for that scanner.
 
 ## Draft files
 

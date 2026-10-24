@@ -3,6 +3,37 @@
   "$id": "https://example.invalid/quality-audit-kit/audit-run.schema.json",
   "title": "Quality Audit Kit draft audit run",
   "description": "DESIGN v0.1: not a published stable API.",
+  "$defs": {
+    "sourceRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "sha",
+        "basis"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "VERIFIED",
+            "UNVERIFIED",
+            "UNKNOWN"
+          ]
+        },
+        "sha": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-fA-F0-9]{40}$"
+        },
+        "basis": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -34,6 +65,13 @@
           "minLength": 1
         },
         "commitSha": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-fA-F0-9]{40}$"
+        },
+        "contextCommitSha": {
           "type": [
             "string",
             "null"
@@ -179,6 +217,44 @@
               }
             }
           }
+        },
+        "scripts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "projectFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "git": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[a-fA-F0-9]{40}$"
+            },
+            "worktree": {
+              "enum": [
+                "CLEAN",
+                "DIRTY",
+                "UNKNOWN"
+              ]
+            }
+          }
         }
       }
     },
@@ -222,6 +298,9 @@
           },
           "scope": {
             "type": "string"
+          },
+          "sourceRevision": {
+            "$ref": "#/$defs/sourceRevision"
           }
         }
       }
@@ -282,7 +361,8 @@
               "HISTORICAL_ACTIONABLE",
               "HISTORICAL_JUSTIFIED",
               "RESOLVED",
-              "REINTRODUCED"
+              "REINTRODUCED",
+              "UNCLASSIFIED"
             ]
           },
           "measurementStatus": {
@@ -310,6 +390,9 @@
               "reference": {
                 "type": "string",
                 "minLength": 1
+              },
+              "sourceRevision": {
+                "$ref": "#/$defs/sourceRevision"
               }
             }
           },

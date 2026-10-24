@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 
 const MEASUREMENT_STATUSES = ['MEASURED', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY'];
+const LIFECYCLE_STATUSES = ['UNCLASSIFIED', 'NEW', 'HISTORICAL_ACTIONABLE', 'HISTORICAL_JUSTIFIED', 'RESOLVED', 'REINTRODUCED'];
 const SEVERITIES = ['INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 
 function safeRelativePath(root, candidate) {
@@ -52,7 +53,7 @@ function createFinding({ root, engine, ruleId, path: candidatePath, line, severi
     ...(line ? { line } : {}),
     severity: severity(severityValue),
     message: message || `${ruleId} reported for ${filePath}`,
-    lifecycle: 'NEW',
+    lifecycle: 'UNCLASSIFIED',
     measurementStatus: 'MEASURED',
     provenance,
   };
@@ -173,6 +174,7 @@ function normalizeJscpd(root, report, provenance) {
 }
 
 module.exports = {
+  LIFECYCLE_STATUSES,
   MEASUREMENT_STATUSES,
   createFinding,
   normalizeJscpd,

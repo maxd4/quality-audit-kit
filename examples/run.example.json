@@ -4,6 +4,7 @@
   "repository": {
     "name": "fictional-demo-repo",
     "commitSha": "0123456789abcdef0123456789abcdef01234567",
+    "contextCommitSha": "0123456789abcdef0123456789abcdef01234567",
     "sourceScopeDescription": "Synthetic immutable example; no actual Git repository was audited."
   },
   "inputScope": "COMMITTED_SNAPSHOT",
@@ -15,14 +16,24 @@
       "version": "example",
       "measurementStatus": "MEASURED",
       "gateOutcome": "INFORMATIVE",
-      "scope": "demo/src"
+      "scope": "demo/src",
+      "sourceRevision": {
+        "status": "VERIFIED",
+        "sha": "0123456789abcdef0123456789abcdef01234567",
+        "basis": "Synthetic committed snapshot explicitly identifies its source revision."
+      }
     },
     {
       "name": "fictional-cycle-check",
       "version": "example",
       "measurementStatus": "SKIPPED_BY_POLICY",
       "gateOutcome": "NOT_EVALUATED",
-      "diagnostic": "Synthetic demonstration of skipped measurement."
+      "diagnostic": "Synthetic demonstration of skipped measurement.",
+      "sourceRevision": {
+        "status": "UNKNOWN",
+        "sha": null,
+        "basis": "No measurement was produced."
+      }
     }
   ],
   "findings": [
@@ -38,7 +49,12 @@
       "measurementStatus": "MEASURED",
       "provenance": {
         "kind": "REPORT",
-        "reference": "synthetic-knip.json#finding-1"
+        "reference": "synthetic-knip.json#finding-1",
+        "sourceRevision": {
+          "status": "VERIFIED",
+          "sha": "0123456789abcdef0123456789abcdef01234567",
+          "basis": "Synthetic report is explicitly tied to the committed snapshot."
+        }
       },
       "rawReference": "synthetic-knip.json#finding-1"
     }

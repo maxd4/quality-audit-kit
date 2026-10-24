@@ -1,6 +1,6 @@
 # MVP product specification
 
-**Status:** IN PROGRESS / EXPERIMENTAL. The first local CLI and the initial Knip/jscpd report adapters are delivered; the full MVP is not.
+**Status:** IN PROGRESS / EXPERIMENTAL. The first local CLI, protected project templates and the initial Knip/jscpd report adapters are delivered; the full MVP is not.
 
 ## Intended initial product
 
@@ -33,7 +33,7 @@ quality-audit-kit scan
 quality-audit-kit report
 ```
 
-`init` writes an explicit local configuration. `scan` is read-only toward source and policy, imports existing Knip/jscpd JSON reports and can execute locally installed binaries only when `--run` is explicit. `report` formats existing recorded evidence. Baselines, triage mutation and policy gates remain unimplemented.
+`init` writes an explicit local configuration and deterministic `PROJECT_HANDOFF.md` / `COMMIT_REVIEW.md` templates. It can prepare an explicit Codex customization request and refresh only managed generated blocks. `scan` is read-only toward source and policy, imports existing Knip/jscpd JSON reports and can execute locally installed binaries only when `--run` is explicit. `report` formats existing recorded evidence. Baselines, triage mutation and policy gates remain unimplemented.
 
 ## Acceptance criteria
 
