@@ -260,53 +260,85 @@ function importSonarExport(root, filePath) {
   const diagnostics = Array.isArray(payload.diagnostics) ? payload.diagnostics.map((item) => ({ ...item })) : [];
   const issues = [];
   const seenIssueKeys = new Set();
-  let reportedTotal = Number.isInteger(payload.issues?.pagination?.reportedTotal) ? payload.issues.pagination.reportedTotal : null;
+  const pagination = payload.issues?.pagination;
+  let reportedTotal = Number.isInteger(pagination?.reportedTotal) && pagination.reportedTotal >= 0 ? pagination.reportedTotal : null;
   let status = payload.status === 'MEASURED' ? 'MEASURED' : payload.status === 'PARTIAL' ? 'PARTIAL' : 'FAILURE';
+  let incomplete = false;
+  const markIncomplete = (code, message, reference = '/api/issues/search') => {
+    incomplete = true;
+    if (status !== 'FAILURE') status = 'PARTIAL';
+    diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code, reference, message });
+  };
+  if (diagnostics.length) {
+    incomplete = true;
+    if (status !== 'FAILURE') status = 'PARTIAL';
+    diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'EXPORT_DECLARED_DIAGNOSTIC', reference: '/api/issues/search', message: 'The export already contains a pagination or completeness diagnostic; its status cannot be upgraded to MEASURED.' });
+  }
 
   if (source.compatibility?.status !== 'COMPATIBLE') {
     status = 'FAILURE';
     diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'INCOMPATIBLE_EXPORT_VERSION', reference: '/api/server/version', message: 'The browser export declared an incompatible or unverified SonarQube server version; the findings are not a clean measurement.' });
   }
 
+  const requestedLimit = Number.isInteger(pagination?.requestedLimit) ? pagination.requestedLimit : null;
+  const effectiveLimit = requestedLimit !== null && requestedLimit >= 1 && requestedLimit <= MAX_RESULTS_LIMIT ? requestedLimit : MAX_RESULTS_LIMIT;
+  if (requestedLimit === null || requestedLimit < 1 || requestedLimit > MAX_RESULTS_LIMIT) markIncomplete('EXPORT_LIMIT_INVALID', `The browser export must declare requestedLimit as an integer between 1 and ${MAX_RESULTS_LIMIT}.`);
+  if (!pagination || !Number.isInteger(pagination.pageSize) || pagination.pageSize < 1 || pagination.pageSize > 500) markIncomplete('EXPORT_PAGE_SIZE_INVALID', 'The browser export must declare a pageSize between 1 and 500.');
+  if (reportedTotal === null) markIncomplete('EXPORT_TOTAL_UNAVAILABLE', 'The browser export must declare a non-negative reportedTotal before it can claim completeness.');
+  if (!pages.length) markIncomplete('EXPORT_PAGES_EMPTY', 'The browser export contains no issue page; an empty page list is not proof of zero findings.');
   let expectedPage = 1;
+  let actualCount = 0;
+  let declaredPageCount = Number.isInteger(pagination?.pageCount) ? pagination.pageCount : null;
+  if (declaredPageCount === null) markIncomplete('EXPORT_PAGE_COUNT_UNAVAILABLE', 'The browser export must declare pageCount so the stored page set can be checked.');
+  else if (declaredPageCount !== pages.length) markIncomplete('EXPORT_PAGE_COUNT_MISMATCH', `The browser export declares ${declaredPageCount} pages but contains ${pages.length}.`);
   for (const [index, page] of pages.entries()) {
     const response = page?.response;
     const pageIndex = response?.paging?.pageIndex;
     const pageIssues = response?.issues;
-    if (!Number.isInteger(pageIndex) || pageIndex !== expectedPage || !Array.isArray(pageIssues)) {
-      status = status === 'FAILURE' ? status : 'PARTIAL';
-      diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'EXPORT_PAGINATION_INCOMPLETE', reference: `/api/issues/search?page=${index + 1}`, message: 'The browser export contains a missing, reordered or malformed issue page; completeness is not established.' });
+    const reference = `/api/issues/search?page=${index + 1}`;
+    const request = page?.request;
+    const requestPage = Number.isInteger(request?.p) ? request.p : null;
+    const requestSize = Number.isInteger(request?.ps) ? request.ps : null;
+    const responsePageSize = response?.paging?.pageSize;
+    const responseTotal = response?.paging?.total;
+    if (!Number.isInteger(pageIndex) || pageIndex !== expectedPage) markIncomplete('EXPORT_PAGINATION_PAGE_MISMATCH', 'The browser export contains a missing or reordered issue page.', reference);
+    if (requestPage === null || requestPage !== pageIndex) markIncomplete('EXPORT_REQUEST_PAGE_MISMATCH', 'The stored issue request does not identify the same page as its response.', reference);
+    if (requestSize === null || requestSize < 1 || requestSize > 500) markIncomplete('EXPORT_REQUEST_PAGE_SIZE_INVALID', 'The stored issue request does not contain a valid page size.', reference);
+    if (!Number.isInteger(responsePageSize) || responsePageSize < 1 || responsePageSize > 500) markIncomplete('EXPORT_RESPONSE_PAGE_SIZE_INVALID', 'The issue response does not contain a valid pageSize.', reference);
+    if (requestSize !== null && Number.isInteger(responsePageSize) && responsePageSize !== requestSize) markIncomplete('EXPORT_PAGE_SIZE_MISMATCH', `The issue response pageSize ${responsePageSize} does not match the requested page size ${requestSize}.`, reference);
+    if (!Array.isArray(pageIssues)) {
+      markIncomplete('EXPORT_ISSUES_NOT_ARRAY', 'The browser export contains a page whose issues field is not an array.', reference);
       continue;
     }
-    if (Number.isInteger(response.paging.total)) {
-      if (reportedTotal === null) reportedTotal = response.paging.total;
-      if (response.paging.total !== reportedTotal) {
-        status = status === 'FAILURE' ? status : 'PARTIAL';
-        diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'PAGINATION_TOTAL_CHANGED', reference: `/api/issues/search?p=${pageIndex}`, message: 'SonarQube reported different totals across exported pages; completeness is not established.' });
-      }
-    }
+    if (!Number.isInteger(responseTotal) || responseTotal < 0) markIncomplete('EXPORT_RESPONSE_TOTAL_INVALID', 'The issue response does not contain a valid total.', reference);
+    else if (reportedTotal !== null && responseTotal !== reportedTotal) markIncomplete('PAGINATION_TOTAL_CHANGED', 'SonarQube reported a total that differs from the export total.', reference);
+    if (requestSize !== null && pageIssues.length > requestSize) markIncomplete('EXPORT_ISSUES_OVER_REQUEST', `The stored issue page contains ${pageIssues.length} issues for a request of ${requestSize}.`, reference);
+    const remaining = Math.max(0, effectiveLimit - actualCount);
+    const accepted = pageIssues.slice(0, Math.min(remaining, requestSize || pageIssues.length));
+    if (accepted.length < pageIssues.length) markIncomplete('EXPORT_RESULT_LIMIT_ENFORCED', `The imported issue page exceeded the effective limit ${effectiveLimit}; excess issues were not imported.`, reference);
     expectedPage += 1;
-    for (const issue of pageIssues) {
+    for (const issue of accepted) {
       const key = issue?.key === undefined ? null : String(issue.key);
       if (key && seenIssueKeys.has(key)) {
-        status = status === 'FAILURE' ? status : 'PARTIAL';
-        diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'DUPLICATE_ISSUE', reference: `sonarqube://issues/${encodeURIComponent(key)}`, message: 'The browser export repeated a SonarQube issue across pages; the duplicate was retained for auditability.' });
+        markIncomplete('DUPLICATE_ISSUE', `The browser export repeated SonarQube issue ${key} across pages; the duplicate was retained for auditability.`, `sonarqube://issues/${encodeURIComponent(key)}`);
       }
       if (key) seenIssueKeys.add(key);
       issues.push(issue);
     }
+    actualCount += accepted.length;
   }
 
-  const requestedLimit = Number(payload.issues?.pagination?.requestedLimit);
-  if (Number.isInteger(reportedTotal) && Number.isInteger(requestedLimit) && reportedTotal > requestedLimit) {
-    status = status === 'FAILURE' ? status : 'PARTIAL';
-    diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'RESULT_LIMIT_REACHED', reference: '/api/issues/search', message: `SonarQube reported ${reportedTotal} results; the browser export limit ${requestedLimit} was reached.` });
-  }
-  if (Number.isInteger(reportedTotal) && issues.length < reportedTotal) {
-    status = status === 'FAILURE' ? status : 'PARTIAL';
-    diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'EXPORT_PAGINATION_INCOMPLETE', reference: '/api/issues/search', message: `The browser export contains ${issues.length} issues for a reported total of ${reportedTotal}; absence cannot be inferred.` });
-  }
-  if (payload.issues?.pagination?.status !== 'COMPLETE' && status === 'MEASURED') status = 'PARTIAL';
+  if (Number.isInteger(reportedTotal) && reportedTotal > effectiveLimit) markIncomplete('RESULT_LIMIT_REACHED', `SonarQube reported ${reportedTotal} results; only the configured limit ${effectiveLimit} can be imported.`);
+  if (Number.isInteger(reportedTotal) && actualCount > reportedTotal) markIncomplete('EXPORT_COUNT_EXCEEDS_TOTAL', `The browser export contains ${actualCount} issues for a reported total of ${reportedTotal}.`);
+  if (Number.isInteger(pagination?.exportedCount) && pagination.exportedCount !== actualCount) markIncomplete('EXPORT_COUNT_MISMATCH', `The export declares ${pagination.exportedCount} findings but its pages contain ${actualCount}.`);
+  const expectedCount = reportedTotal === null ? null : Math.min(reportedTotal, effectiveLimit);
+  if (expectedCount !== null && actualCount !== expectedCount) markIncomplete('EXPORT_PAGINATION_INCOMPLETE', `The browser export contains ${actualCount} issues for an expected count of ${expectedCount}; absence cannot be inferred.`);
+  const calculatedLimitReached = reportedTotal !== null && reportedTotal > effectiveLimit;
+  if (typeof pagination?.limitReached !== 'boolean') markIncomplete('EXPORT_LIMIT_STATUS_UNAVAILABLE', 'The browser export must declare whether the configured result limit was reached.');
+  else if (pagination.limitReached !== calculatedLimitReached) markIncomplete('EXPORT_LIMIT_STATUS_MISMATCH', 'The browser export limitReached flag does not match the declared total and configured limit.');
+  const completeByEvidence = !incomplete && reportedTotal !== null && actualCount === Math.min(reportedTotal, effectiveLimit) && !calculatedLimitReached;
+  if (pagination?.status !== 'COMPLETE' && completeByEvidence) markIncomplete('EXPORT_STATUS_INCONSISTENT', 'The export declared a non-complete pagination status despite complete page evidence.');
+  if (pagination?.status === 'COMPLETE' && !completeByEvidence) markIncomplete('EXPORT_COMPLETENESS_CONTRADICTION', 'The export declared COMPLETE but the pages and counters do not prove a complete measurement.');
 
   const analysisResponse = payload.analysis?.response;
   const analysis = Array.isArray(analysisResponse?.analyses) ? analysisResponse.analyses[0] || null : null;

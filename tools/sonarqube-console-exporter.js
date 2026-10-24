@@ -109,6 +109,7 @@
     if (pageIndex !== null && pageIndex !== requestedPage) diagnostics.push(diagnostic('PAGINATION_PAGE_MISMATCH', `/api/issues/search?p=${requestedPage}`, `SonarQube returned page ${pageIndex} for requested page ${requestedPage}.`));
     if (pageSize !== null && pageSize < 1) diagnostics.push(diagnostic('PAGINATION_PAGE_SIZE_INVALID', `/api/issues/search?p=${requestedPage}`, 'SonarQube returned an invalid page size.'));
     if (pageSize !== null && pageSize > requestedSize) diagnostics.push(diagnostic('PAGINATION_PAGE_SIZE_UNEXPECTED', `/api/issues/search?p=${requestedPage}`, 'SonarQube returned more issues than requested; completeness is not assumed.'));
+    if (issues && issues.length > requestedSize) diagnostics.push(diagnostic('PAGINATION_ISSUES_OVER_REQUEST', `/api/issues/search?p=${requestedPage}`, `SonarQube returned ${issues.length} issues for a request of ${requestedSize}; only the requested bound is retained.`));
     return { issues: issues || [], paging: paging || null, total, diagnostics };
   }
 
@@ -163,8 +164,10 @@
         break;
       }
       const assessment = issuePageAssessment(response, page, requestSize);
-      const pageIssues = assessment.issues;
-      base.issues.pages.push({ request: query, response });
+      const pageIssues = assessment.issues.slice(0, requestSize);
+      if (assessment.diagnostics.length) partial = true;
+      const storedResponse = assessment.issues.length > pageIssues.length ? { ...response, issues: pageIssues } : response;
+      base.issues.pages.push({ request: query, response: storedResponse });
       base.issues.pagination.pageCount = base.issues.pages.length;
       base.issues.pagination.exportedCount += pageIssues.length;
       base.diagnostics.push(...assessment.diagnostics);
@@ -183,12 +186,17 @@
         }
         if (key) issueKeys.add(key);
       }
+      if (assessment.issues.length > pageIssues.length) break;
       if (!pageIssues.length) break;
       if (total !== null && base.issues.pagination.exportedCount >= total) break;
       if (pageIssues.length < requestSize && total === null) { partial = true; break; }
       page += 1;
     }
     base.issues.pagination.reportedTotal = total;
+    if (total !== null && base.issues.pagination.exportedCount > total) {
+      partial = true;
+      base.diagnostics.push(diagnostic('PAGINATION_COUNT_EXCEEDS_TOTAL', '/api/issues/search', `SonarQube returned ${base.issues.pagination.exportedCount} issues for a reported total of ${total}.`));
+    }
     base.issues.pagination.limitReached = total !== null && total > config.maxResults;
     if (base.issues.pagination.limitReached) {
       partial = true;

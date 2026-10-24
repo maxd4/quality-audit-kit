@@ -29,6 +29,34 @@ function fixtureRepository() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'quality-audit-kit-browser-export-'));
 }
 
+function issuePage(pageIndex, pageSize, total, issues, requestSize = pageSize) {
+  return {
+    request: { p: pageIndex, ps: requestSize },
+    response: { paging: { total, pageIndex, pageSize }, issues },
+  };
+}
+
+function browserPayload({ pages, reportedTotal, requestedLimit = 1000, pageSize = 500, status = 'MEASURED', pagination = {}, analysis = { analyses: [] } }) {
+  return {
+    format: 'quality-audit-kit/sonarqube-browser-export',
+    formatVersion: 1,
+    exportedAt: '2026-10-24T12:00:00.000Z',
+    status,
+    source: { origin: 'https://sonar.example.invalid', project: 'demo-project', branch: null, pullRequest: null, version: '10.6.0.92116', apiProfile: 'web-api-v2-aware-v1-compatible', compatibility: { status: 'COMPATIBLE' } },
+    serverVersion: { endpoint: '/api/server/version', response: '10.6.0.92116' },
+    issues: { endpoint: '/api/issues/search', pagination: { requestedLimit, pageSize, reportedTotal, exportedCount: pages.reduce((sum, page) => sum + (Array.isArray(page.response?.issues) ? page.response.issues.length : 0), 0), pageCount: pages.length, status: 'COMPLETE', limitReached: false, ...pagination }, pages },
+    analysis: { endpoint: '/api/project_analyses/search', response: analysis, selected: Array.isArray(analysis.analyses) ? analysis.analyses[0] || null : null },
+    diagnostics: [],
+  };
+}
+
+function writeBrowserPayload(payload) {
+  const repository = fixtureRepository();
+  const filePath = path.join(repository, 'sonarqube-export.json');
+  fs.writeFileSync(filePath, `${JSON.stringify(payload)}\n`);
+  return { repository, filePath };
+}
+
 test('SonarQube browser exporter paginates same-origin simulated responses without auth access', async () => {
   const exporter = loadExporter();
   const calls = [];
@@ -67,6 +95,66 @@ test('SonarQube browser exporter paginates same-origin simulated responses witho
   assert.equal(calls.filter((call) => call.parsed.pathname === '/api/issues/search').length, 2);
   assert.equal(/document\.cookie|localStorage|sessionStorage/.test(fs.readFileSync(SCRIPT, 'utf8')), false);
   assert.doesNotMatch(JSON.stringify(exported), /secret|authorization/i);
+  const repeated = await exporter.collect({ maxResults: 3, pageSize: 2 }, { location, fetch, now: () => '2026-10-24T12:00:00.000Z' });
+  assert.deepEqual(repeated, exported);
+});
+
+test('browser exporter makes pagination diagnostics force PARTIAL and preserves only the requested bound', async () => {
+  const exporter = loadExporter();
+  const location = { origin: 'https://sonar.example.invalid', href: 'https://sonar.example.invalid/project/overview?id=demo-project' };
+  const collectWith = async (issueBody, options = { maxResults: 1, pageSize: 1 }) => exporter.collect(options, {
+    location,
+    fetch: async (url) => {
+      const pathname = new URL(url).pathname;
+      if (pathname === '/api/server/version') return response('10.6.0.92116');
+      if (pathname === '/api/issues/search') return response(JSON.stringify(issueBody));
+      if (pathname === '/api/project_analyses/search') return response(JSON.stringify({ analyses: [] }));
+      throw new Error(`unexpected endpoint ${pathname}`);
+    },
+    now: () => '2026-10-24T12:00:00.000Z',
+  });
+
+  const oversized = await collectWith({ paging: { total: 2, pageIndex: 1, pageSize: 999 }, issues: [{ key: 'ISSUE-1' }, { key: 'ISSUE-2' }] });
+  assert.equal(oversized.status, 'PARTIAL');
+  assert.equal(oversized.issues.pagination.status, 'PARTIAL');
+  assert.equal(oversized.issues.pagination.exportedCount, 1);
+  assert.equal(oversized.issues.pages[0].response.issues.length, 1);
+  assert.ok(oversized.diagnostics.some((item) => item.code === 'PAGINATION_PAGE_SIZE_UNEXPECTED'));
+  assert.ok(oversized.diagnostics.some((item) => item.code === 'PAGINATION_ISSUES_OVER_REQUEST'));
+
+  const missingSize = await collectWith({ paging: { total: 1, pageIndex: 1 }, issues: [{ key: 'ISSUE-1' }] });
+  assert.equal(missingSize.status, 'PARTIAL');
+  assert.ok(missingSize.diagnostics.some((item) => item.code === 'PAGINATION_METADATA_UNAVAILABLE'));
+
+  const wrongPage = await collectWith({ paging: { total: 1, pageIndex: 2, pageSize: 1 }, issues: [{ key: 'ISSUE-1' }] });
+  assert.equal(wrongPage.status, 'PARTIAL');
+  assert.ok(wrongPage.diagnostics.some((item) => item.code === 'PAGINATION_PAGE_MISMATCH'));
+
+  const malformed = await collectWith({ paging: { total: 0, pageIndex: 1, pageSize: 1 }, issues: {} });
+  assert.equal(malformed.status, 'PARTIAL');
+  assert.ok(malformed.diagnostics.some((item) => item.code === 'MALFORMED_ISSUE_RESPONSE'));
+});
+
+test('browser exporter never exceeds the configured or absolute 10000 finding bound', async () => {
+  const exporter = loadExporter();
+  const location = { origin: 'https://sonar.example.invalid', href: 'https://sonar.example.invalid/project/overview?id=demo-project' };
+  const issues = Array.from({ length: 10001 }, (_, index) => ({ key: `ISSUE-${index}` }));
+  const exported = await exporter.collect({ maxResults: 10000, pageSize: 500 }, {
+    location,
+    fetch: async (url) => {
+      const pathname = new URL(url).pathname;
+      if (pathname === '/api/server/version') return response('10.6.0.92116');
+      if (pathname === '/api/issues/search') return response(JSON.stringify({ paging: { total: 10001, pageIndex: 1, pageSize: 500 }, issues }));
+      if (pathname === '/api/project_analyses/search') return response(JSON.stringify({ analyses: [] }));
+      throw new Error(`unexpected endpoint ${pathname}`);
+    },
+  });
+  assert.equal(exported.status, 'PARTIAL');
+  assert.ok(exported.issues.pagination.exportedCount <= 10000);
+  assert.equal(exported.issues.pages[0].response.issues.length, 500);
+  assert.ok(exported.issues.pages.every((page) => page.response.issues.length <= 500));
+  assert.ok(exported.diagnostics.some((item) => item.code === 'PAGINATION_ISSUES_OVER_REQUEST'));
+  assert.ok(exported.diagnostics.some((item) => item.code === 'RESULT_LIMIT_REACHED'));
 });
 
 test('browser export importer preserves partial pagination and reuses the SonarQube normalization contract', async () => {
@@ -98,6 +186,53 @@ test('browser export importer preserves partial pagination and reuses the SonarQ
     assert.ok(imported.diagnostics.some((item) => item.code === 'RESULT_LIMIT_REACHED'));
   } finally {
     fs.rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test('browser export importer recalculates completeness and rejects empty or contradictory evidence', () => {
+  const empty = writeBrowserPayload(browserPayload({ pages: [], reportedTotal: null, pagination: { exportedCount: 0, pageCount: 0 } }));
+  const contradictory = writeBrowserPayload(browserPayload({
+    pages: [issuePage(1, 2, 1, [{ key: 'ISSUE-1', component: 'demo-project:src/a.js', message: 'Issue' }])],
+    reportedTotal: 1,
+    pagination: { exportedCount: 0 },
+  }));
+  const zero = writeBrowserPayload(browserPayload({ pages: [issuePage(1, 500, 0, [])], reportedTotal: 0, pagination: { exportedCount: 0 } }));
+  try {
+    const emptyImported = importSonarExport(empty.repository, empty.filePath);
+    assert.notEqual(emptyImported.status, 'MEASURED');
+    assert.ok(emptyImported.diagnostics.some((item) => item.code === 'EXPORT_PAGES_EMPTY'));
+    assert.ok(emptyImported.diagnostics.some((item) => item.code === 'EXPORT_TOTAL_UNAVAILABLE'));
+
+    const contradictoryImported = importSonarExport(contradictory.repository, contradictory.filePath);
+    assert.notEqual(contradictoryImported.status, 'MEASURED');
+    assert.ok(contradictoryImported.diagnostics.some((item) => item.code === 'EXPORT_COUNT_MISMATCH'));
+    assert.ok(contradictoryImported.diagnostics.some((item) => item.code === 'EXPORT_COMPLETENESS_CONTRADICTION'));
+
+    const zeroImported = importSonarExport(zero.repository, zero.filePath);
+    assert.equal(zeroImported.status, 'MEASURED');
+    assert.equal(zeroImported.findings.length, 0);
+    assert.equal(zeroImported.engine.measurementStatus, 'MEASURED');
+  } finally {
+    for (const item of [empty, contradictory, zero]) fs.rmSync(item.repository, { recursive: true, force: true });
+  }
+});
+
+test('browser export importer refuses missing page metadata, counter drift and never upgrades revisions to VERIFIED', () => {
+  const malformed = writeBrowserPayload(browserPayload({
+    pages: [{ request: { p: 1, ps: 1 }, response: { paging: { total: 1, pageIndex: 1 }, issues: [{ key: 'ISSUE-1' }] } }],
+    reportedTotal: 1,
+    pageSize: 1,
+    pagination: { exportedCount: 1 },
+    analysis: { analyses: [{ revision: 'c'.repeat(40) }] },
+  }));
+  try {
+    const imported = importSonarExport(malformed.repository, malformed.filePath);
+    assert.notEqual(imported.status, 'MEASURED');
+    assert.ok(imported.diagnostics.some((item) => item.code === 'EXPORT_RESPONSE_PAGE_SIZE_INVALID'));
+    assert.equal(imported.sourceRevision.status, 'UNVERIFIED');
+    assert.notEqual(imported.sourceRevision.status, 'VERIFIED');
+  } finally {
+    fs.rmSync(malformed.repository, { recursive: true, force: true });
   }
 });
 
