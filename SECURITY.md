@@ -1,6 +1,6 @@
 # Security policy
 
-**No published binary, npm CLI or hosted service currently exists.** The present surface consists of documentation, data schemas, fictional examples and a local fixture checker.
+**No published npm package, hosted service or dashboard currently exists.** The repository contains a private local CLI tarball workflow, documentation, data schemas, fictional examples and local checks. `npm run test:package` installs only a local tarball with network access disabled and removes it afterward; no publication is performed.
 
 If you find a vulnerability in a future implementation, prefer a **private GitHub vulnerability report** when repository security advisories are enabled. Otherwise contact the maintainers privately using a verified project channel before disclosing exploit details; do not put tokens, personal information or exploitable details in a public issue.
 

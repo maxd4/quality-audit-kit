@@ -1,19 +1,27 @@
-name: Fixture checks
+name: Quality Audit Kit checks (optional)
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   validate-examples:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18.x', '20.x']
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
       - name: Check synthetic contracts
         run: python3 tools/validate_examples.py
       - name: Check CLI syntax
         run: npm run check
       - name: Run CLI tests
         run: npm test
+      - name: Test local npm package install and uninstall
+        run: npm run test:package

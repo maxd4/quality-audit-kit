@@ -18,6 +18,10 @@ def main():
     decisions = read("examples/decisions.example.json")
     run_schema = read("schemas/audit-run.schema.json")
     decision_schema = read("schemas/triage-decision.schema.json")
+    config = read("examples/quality-audit-kit.config.example.json")
+    assert config["version"] == "0.1-draft"
+    assert config["quality"]["ratchet"]["maxNewBlockingFindings"] == 0
+    assert set(config["scanners"]) == {"knip", "jscpd"}
     assert run["schemaVersion"] == run_schema["properties"]["schemaVersion"]["const"]
     assert decisions["schemaVersion"] == decision_schema["properties"]["schemaVersion"]["const"]
     assert run["repository"]["name"] == "fictional-demo-repo"

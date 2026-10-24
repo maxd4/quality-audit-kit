@@ -18,6 +18,7 @@ out/
 .env.*
 !.env.example
 artifacts/
+*.tgz
 *.log
 *.tmp
 *.temp

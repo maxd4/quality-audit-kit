@@ -110,3 +110,13 @@ Validation scripts are separate from agent confinement. A script name is not a s
 ## Data privacy and export
 
 Reporters must be able to redact absolute paths, user identities, tokens, environment values and private source excerpts. Offline bundles require an explicit inventory and must not silently include raw files, full source trees or credential-bearing command logs.
+
+## CLI and distribution boundary
+
+The supported user-facing path is the seven-command core: `init`, `scan`, `report`, `plan`, `thresholds`, `fix` and `verify`. `context`, `baseline`, `triage`, `connect` and `import` remain advanced commands and must not be required for a basic local run. `--help` is concise and command-scoped; an invalid invocation exits with status `1` and an actionable syntax hint. A policy or evidence blocker exits with status `2`; neither status is a successful quality result.
+
+`init` may create `quality-audit-kit.config.json` and protected generic templates. `scan`, `report`, `plan`, `fix --next` and `verify` are read-only toward the analyzed source by default. Normative policy mutation requires explicit `--apply --approve`; correction execution requires explicit `--execute --approve`, and verification never executes an agent. Existing output artifacts are protected against silent overwrite.
+
+The npm distribution is a local, private tarball while this draft contract remains experimental. `npm pack --ignore-scripts` is the distribution boundary; `npm run test:package` must install the tarball with network access disabled, execute the installed binary and remove it from an isolated consumer. No package lifecycle script may call `npm publish`. The optional GitHub Actions workflow is manual-only, requests `contents: read`, persists no checkout credentials and does not upload findings to a dashboard.
+
+Distribution proof is environment-scoped. A successful Windows run with the configured Node runtime does not prove Linux, macOS or every supported Node release. Evaluation records install time, audit time, artifact/output size, available platform, classification fixtures and human approval points separately; unavailable platforms and unexecuted remote workflows remain `NOT_RUN`.

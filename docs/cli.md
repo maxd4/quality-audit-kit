@@ -1,10 +1,10 @@
-# Local CLI prototype
+# Local CLI and distribution contract
 
-**Status:** EXPERIMENTAL, implemented in this repository and not published to npm.
+**Status:** EXPERIMENTAL, implemented in this repository and packable as a private local npm tarball; not published to npm.
 
 The package uses only Node.js built-ins and supports Node.js 18 or newer. It does not install dependencies, create a dashboard, require an account or modify the source files of the repository being analyzed.
 
-## Commands
+## Core commands
 
 ```text
 quality-audit-kit init [repository] [--force] [--templates deterministic|none] [--update-templates] [--preview]
@@ -29,7 +29,13 @@ quality-audit-kit thresholds recommend run.json [--baseline file] [--format json
 quality-audit-kit thresholds recommend run.json --apply --approve [--profile progressive|balanced|strict]
 ```
 
+The short user path is `init → scan → report → plan → fix → verify`; `thresholds recommend` is an optional policy step. `quality-audit-kit --help` shows this path without connector details, and `quality-audit-kit <core-command> --help` shows concise command-specific syntax. Connector, baseline, triage and context commands remain available as advanced commands.
+
 When running from a checkout without a package installation, use `node bin/quality-audit-kit.js` in place of `quality-audit-kit`.
+
+`init` creates the smallest useful local configuration. A hand-written equivalent is available at [`examples/quality-audit-kit.config.example.json`](../examples/quality-audit-kit.config.example.json). Missing analyzers are not installed: start with existing report files, or pass `--run` only when the target repository already contains the requested local binaries.
+
+Errors are written to stderr with exit status 1 and include an actionable command hint. Evidence or policy blockers are represented in JSON with status 2; status 2 is not a pass. Existing output files are never overwritten, so choose a new `--output` path or remove an artifact deliberately before retrying.
 
 `init` detects the package manager, declared workspaces, repository languages, scanner configuration, local scanner binaries, documentation, tests and governance files. It writes `quality-audit-kit.config.json` only when it is missing or `--force` is explicit, and creates the generic `PROJECT_HANDOFF.md` and `COMMIT_REVIEW.md` templates when they are missing.
 
@@ -112,6 +118,10 @@ The workflow re-runs the scanners represented by the lot when local binaries are
 
 `verify fix-result.json` is read-only. It checks the result contract, redaction boundary, scope audit, targeted reanalysis state and validation outcome. It never runs an agent and never changes the project.
 
+## Local npm package
+
+The package is intentionally marked `private` while the semver and cross-platform release contract remain experimental. `npm pack --ignore-scripts` creates a local tarball containing only the allowlisted runtime, schemas, documentation and examples. `npm run test:package` installs that tarball into an isolated consumer with network access disabled, executes the installed binary, then uninstalls it. No lifecycle hook publishes the package and no command invokes `npm publish`.
+
 ## Threshold recommendations
 
 `thresholds recommend run.json` is a local advisory policy counselor. It consumes explicit `run.metrics` records when available and otherwise derives only `finding_count` series from findings whose engines and findings are `MEASURED`. It never changes the source tree, baseline, decisions or configuration by default.
@@ -128,7 +138,7 @@ The CLI emits `schemaVersion: 0.1-draft`, `inputScope: WORKTREE_LIVE` and `repro
 
 Finding IDs are SHA-256 fingerprints of the engine, rule, normalized repository-relative path and a stable rule-specific locus. Line movement alone is not part of the fingerprint. jscpd fingerprints include the normalized duplicate pair and available fragment/token information; path moves and scanner-specific changes can still legitimately change an ID.
 
-Package publication, hosted service and automatic remediation remain unimplemented. SARIF and SonarQube connectors are optional and local-first; no account is required by the other commands. Baseline replacement and triage writes are explicit local mutations; scanning itself does not modify analyzed source code.
+Registry publication, hosted service and automatic remediation remain unimplemented. The local npm tarball path is exercised; registry publication, registry installation and package signing remain `NOT_RUN`. SARIF and SonarQube connectors are optional and local-first; no account is required by the other commands. Baseline replacement and triage writes are explicit local mutations; scanning itself does not modify analyzed source code.
 
 ## References for imported formats
 

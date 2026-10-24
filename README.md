@@ -2,7 +2,7 @@
 
 **Evidence-driven software quality governance.**
 
-> **Status: EXPERIMENTAL.** This repository contains a first local Node.js CLI, draft data contracts and a dependency-free validation harness. It is not yet a published npm package, GitHub Action, dashboard or extracted CleanMyMap scanner. Do not use it as a mature quality gate.
+> **Status: EXPERIMENTAL.** This repository contains a local Node.js CLI, draft data contracts, a dependency-free validation harness and a manually triggered optional GitHub Actions check. The package is packable as a private local npm tarball; it is not published, a dashboard is not provided, and no CleanMyMap scanner is extracted. Do not use it as a mature quality gate.
 
 Quality Audit Kit is intended to connect the findings emitted by existing analyzers to explicit, reviewable decisions, baselines and reproducible evidence. Its purpose is **not** to replace ESLint, Knip, jscpd, Semgrep, SonarQube or similar tools.
 
@@ -32,7 +32,8 @@ A quality scan answers what an analyzer found. A maintenance workflow also needs
 | Offline evidence bundles | MVP | Implemented locally, experimental |
 | Deterministic correction planning | MVP | Implemented locally, experimental |
 | Explainable threshold recommendations | MVP | Implemented locally, advisory |
-| npm CLI | After MVP verification | Local package prototype; not published |
+| npm CLI | After MVP verification | Private local tarball with install/uninstall smoke test; not published |
+| Optional GitHub Actions check | Distribution preparation | Manual-only workflow with `contents: read`; no dashboard or required remote service |
 | Local SARIF 2.1.0 import/export and optional SonarQube connector | Implemented | Opt-in; no account required by other commands |
 | Dependency graph and architectural radar | Later | Not implemented |
 
@@ -52,7 +53,7 @@ This repository installs no analyzer. A target repository's locally installed Kn
 
 ## Start the local CLI
 
-Requirements: Node.js 18 or newer. Runtime dependencies are not installed implicitly.
+Requirements: Node.js 18 or newer. Runtime dependencies are not installed implicitly. The package intentionally remains `private` until a semver and cross-platform release decision is made.
 
 From this repository:
 
@@ -82,6 +83,21 @@ node bin/quality-audit-kit.js thresholds recommend run.json --output threshold-r
 # Normative mutation requires an explicit approval flag:
 node bin/quality-audit-kit.js thresholds recommend run.json --apply --approve --profile balanced
 ```
+
+For a minimal hand-written configuration, copy [examples/quality-audit-kit.config.example.json](examples/quality-audit-kit.config.example.json) to `quality-audit-kit.config.json`. `init` creates the same functional defaults plus protected project templates.
+
+To test the local npm distribution without publishing anything:
+
+```bash
+npm pack --ignore-scripts
+npm run test:package
+# Optional local installation from the generated tarball:
+npm install --global ./quality-audit-kit-0.1.0.tgz
+quality-audit-kit --help
+npm uninstall --global quality-audit-kit
+```
+
+`npm run test:package` packs the allowlisted files, installs the tarball into an isolated temporary consumer with network access disabled, runs the installed binary, and uninstalls it. It does not call `npm publish`.
 
 `init` writes an explicit `quality-audit-kit.config.json` and creates generic, protected `PROJECT_HANDOFF.md` and `COMMIT_REVIEW.md` templates in the target repository. It detects actual files, configurations, documentation, tests and rules; unproven fields remain `UNKNOWN`. Re-running `init` is safe: existing documents are protected, while `--update-templates --preview` shows a deterministic diff and `--update-templates` refreshes only managed generated blocks. `context refresh` updates only stale detected facts and controls, preserves human decisions and reports contradictions instead of rewriting instructions. `--agent codex` prepares an optional, explicit Codex customization handoff; the CLI never executes an agent or installs dependencies implicitly. `scan` writes JSON to stdout unless `--output` is provided, and does not modify analyzed source files. Existing `knip-report.json` and `jscpd-report.json` files are imported automatically; `--run` executes only locally installed scanner binaries and never installs dependencies. An absent, skipped or failed scanner remains visible as `NOT_MEASURED` or `FAILURE`; it is never treated as a clean result. `baseline` requires a complete measured run, `triage` preserves evidence-backed decisions, and `scan --baseline` refuses incomplete comparisons and applies the configured ratchet without changing the baseline implicitly. See [CLI usage and contracts](docs/cli.md).
 
@@ -115,7 +131,11 @@ The [example run](examples/run.example.json) and [decision records](examples/dec
 python3 tools/validate_examples.py
 ```
 
-The Python harness checks a small set of cross-file invariants, while `npm test` runs real CLI integration tests for report import, stable IDs, discovery, negative measurement states, historical comparison, triage and ratchets. Neither is a universal quality gate for the analyzed repository; incomplete or unverified audits remain `NOT_EVALUATED`.
+The Python harness checks a small set of cross-file invariants, `npm test` runs real CLI integration tests for report import, stable IDs, discovery, negative measurement states, historical comparison, triage and ratchets, and `npm run test:package` checks local installation and removal. `node tools/measure-workflows.js` provides a read-only, two-repository measurement harness; its observed scope and limits are recorded in [Evaluation](docs/evaluation.md). The optional manual workflow in `.github/workflows/fixtures.yml` repeats these checks on Ubuntu for Node 18 and 20 with only `contents: read`; it is not a required service and does not publish results to a dashboard. Neither local nor CI checks are a universal quality gate for the analyzed repository; incomplete or unverified audits remain `NOT_EVALUATED`.
+
+## Optional GitHub Actions integration
+
+The repository includes a manual-only workflow. Run it from the Actions tab when GitHub is part of the project workflow; otherwise use the same local commands. It uses `actions/checkout` with credentials persistence disabled, requests only `contents: read`, and performs no deployment, issue creation, code-scanning upload or dashboard publication.
 
 ## Relationship to CleanMyMap
 

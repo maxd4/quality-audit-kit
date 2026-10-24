@@ -1,0 +1,13 @@
+{
+  "version": "0.1-draft",
+  "scanners": {
+    "knip": { "report": "knip-report.json" },
+    "jscpd": { "report": "jscpd-report.json" }
+  },
+  "quality": {
+    "ratchet": {
+      "blockingSeverities": ["HIGH", "CRITICAL"],
+      "maxNewBlockingFindings": 0
+    }
+  }
+}
