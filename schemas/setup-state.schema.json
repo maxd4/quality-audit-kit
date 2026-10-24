@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/maxd4/quality-audit-kit/blob/main/schemas/setup-state.schema.json",
+  "title": "Quality Audit Kit setup state",
+  "description": "Resumable, local-only progress and evidence contract for quality-audit-kit setup.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "setupVersion",
+    "command",
+    "status",
+    "repository",
+    "statePath",
+    "steps",
+    "commands",
+    "files",
+    "artifacts",
+    "capabilities",
+    "missingInformation",
+    "humanActions",
+    "questions"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "0.1-draft" },
+    "setupVersion": { "const": "0.1-draft" },
+    "command": { "const": "setup" },
+    "status": { "enum": ["IN_PROGRESS", "COMPLETE", "PARTIAL", "BLOCKED"] },
+    "resumed": { "type": "boolean" },
+    "repository": {
+      "type": "object",
+      "required": ["root", "name"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "name": { "type": ["string", "null"] },
+        "git": { "type": ["object", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "statePath": { "type": "string", "minLength": 1 },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status"],
+        "properties": {
+          "id": { "enum": ["DISCOVERY", "INITIALIZATION", "PERSONALIZATION", "AUDIT", "REPORT", "SUMMARY"] },
+          "status": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["command", "status", "exitCode", "observed"],
+        "properties": {
+          "command": { "type": "string" },
+          "status": { "type": "string" },
+          "exitCode": { "type": "integer" },
+          "observed": {}
+        },
+        "additionalProperties": true
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "status"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "status": { "type": "string" },
+          "role": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "artifacts": { "type": "object", "additionalProperties": { "type": "string" } },
+    "capabilities": {
+      "type": "object",
+      "required": ["activated", "unavailable", "unverified"],
+      "properties": {
+        "activated": { "type": "array", "items": { "type": "string" } },
+        "unavailable": { "type": "array", "items": { "type": "string" } },
+        "unverified": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "missingInformation": { "type": "array", "items": { "type": "string" } },
+    "humanActions": { "type": "array", "items": { "type": "string" } },
+    "questions": { "type": "array", "items": { "type": "string" } },
+    "updatedAt": { "type": "string" }
+  },
+  "additionalProperties": true
+}

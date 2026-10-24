@@ -7,6 +7,8 @@ The package uses only Node.js built-ins and supports Node.js 18 or newer. It doe
 ## Core commands
 
 ```text
+quality-audit-kit setup [repository] [--state file] [--answers file] [--run[=knip,jscpd]]
+quality-audit-kit setup --resume state.json [--answers file] [--run[=knip,jscpd]]
 quality-audit-kit init [repository] [--force] [--templates deterministic|none] [--update-templates] [--preview]
 quality-audit-kit init [repository] --agent codex [--agent-prompt file] [--agent-input file]
 quality-audit-kit init [repository] --link-agents
@@ -30,7 +32,17 @@ quality-audit-kit thresholds recommend run.json [--baseline file] [--format json
 quality-audit-kit thresholds recommend run.json --apply --approve [--profile progressive|balanced|strict]
 ```
 
-The short user path is `init → scan → report → plan → fix → verify`; `thresholds recommend` is an optional policy step. `quality-audit-kit --help` shows this path without connector details, and `quality-audit-kit <core-command> --help` shows concise command-specific syntax. Connector, baseline, triage and context commands remain available as advanced commands.
+The short user path is `setup → plan → fix → verify`; `init → scan → report` remain independently usable, and `thresholds recommend` is an optional policy step. `quality-audit-kit --help` shows this path without connector details, and `quality-audit-kit <core-command> --help` shows concise command-specific syntax. Connector, baseline, triage and context commands remain available as advanced commands.
+
+## Resumable setup
+
+`setup` is the deterministic orchestration entry point for an AI agent or a human. It discovers the repository, delegates initialization to `init`, runs the default offline `scan` without installing analyzers, and delegates Markdown generation to `report`. It writes `quality-audit-kit.setup.json`, `quality-audit-kit.setup.run.json` and `quality-audit-kit.setup.report.md` inside the analyzed repository unless an explicit in-repository state path is supplied.
+
+The setup state is defined by [`schemas/setup-state.schema.json`](../schemas/setup-state.schema.json). It records ordered steps (`DISCOVERY`, `INITIALIZATION`, `PERSONALIZATION`, `AUDIT`, `REPORT`, `SUMMARY`), exact file paths, commands and observed results, activated/unavailable/unverified capabilities, missing information, human actions and precise questions. The final state is `COMPLETE`, `PARTIAL` or `BLOCKED`; status 2 is used for the latter two states.
+
+Setup never overwrites an existing setup state. `setup --resume state.json` reuses the recorded run and report when they still exist. An explicit `--answers file` may apply only the generated-block fields accepted by `init --agent codex --agent-input`: `projectHandoffGenerated` and `commitReviewGenerated`. Marker injection, secret-like values, unmanaged documents and unsafe paths are rejected before mutation. Manual blocks and existing `AGENTS.md` content remain protected.
+
+The default setup has no network access requirement and does not execute scanners. `--run` is an explicit authorization to execute only already installed local Knip/jscpd binaries; it never installs dependencies. Missing reports or scanners remain `NOT_MEASURED` and normally produce `PARTIAL`, not a clean result. An AI provider is not required: the same state machine and artifacts can be used by a human with the local CLI.
 
 When running from a checkout without a package installation, use `node bin/quality-audit-kit.js` in place of `quality-audit-kit`.
 

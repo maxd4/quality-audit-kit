@@ -9,7 +9,7 @@ Quality Audit Kit is intended to connect the findings emitted by existing analyz
 ## Install with your AI agent (Recommended)
 
 ```text
-Install Quality Audit Kit from https://github.com/maxd4/quality-audit-kit into this project. Use the repository's current GitHub checkout method (do not use npm, because the package is not published). Automatically create or update only the minimal quality-audit-kit.config.json and protected generic templates, then run an initial read-only audit using existing analyzer reports or only analyzers already installed locally; do not install analyzers implicitly. Generate a Markdown report. Finish with a concise report listing the files created or changed, every command and check actually executed with its result, and the human confirmations still required. Do not modify application source, dependencies, baselines, thresholds or remotes, publish anything, or apply fixes without explicit approval.
+Install Quality Audit Kit from https://github.com/maxd4/quality-audit-kit into this project. Use the repository's current GitHub checkout method (do not use npm, because the package is not published), then run its `setup` command. Discover the real repository sources, create or reuse only the minimal quality-audit-kit.config.json and protected generic templates, run an initial read-only audit using existing analyzer reports or only analyzers already installed locally, and generate a Markdown report. If semantic personalization is needed, inspect the real sources and resume setup with an explicit answers JSON; do not install analyzers implicitly. Finish with the structured setup state and a concise report listing exact files, every command and check actually executed with its observed result, unavailable or unverified capabilities, missing information, precise second-pass questions, and remaining human confirmations. Do not modify application source, dependencies, baselines, thresholds or remotes, publish anything, or apply fixes without explicit approval.
 ```
 
 ## Install manually
@@ -51,6 +51,7 @@ A quality scan answers what an analyzer found. A maintenance workflow also needs
 | Offline evidence bundles | MVP | Implemented locally, experimental |
 | Deterministic correction planning | MVP | Implemented locally, experimental |
 | Explainable threshold recommendations | MVP | Implemented locally, advisory |
+| Official Agent Skill and resumable setup | Distribution preparation | Local `setup` orchestration and `skills/quality-audit-kit-setup/SKILL.md`; experimental |
 | npm CLI | After MVP verification | Private local tarball with install/uninstall smoke test; not published |
 | Optional GitHub Actions check | Distribution preparation | Manual-only workflow with `contents: read`; no dashboard or required remote service |
 | Local SARIF 2.1.0 import/export and optional SonarQube connector | Implemented | Opt-in; no account required by other commands |
@@ -73,6 +74,8 @@ This repository installs no analyzer. A target repository's locally installed Kn
 ## Use the local CLI
 
 Requirements: Node.js 18 or newer. Runtime dependencies are not installed implicitly. The package intentionally remains `private` until a semver and cross-platform release decision is made.
+
+For an agent-oriented first pass, use `node bin/quality-audit-kit.js setup /path/to/repository`. It writes a structured, resumable `quality-audit-kit.setup.json` state and reuses the run/report artifacts on `setup --resume`; `--answers file` applies only explicit, validated generated-block content. The setup workflow is offline by default and does not require an AI provider.
 
 Additional local workflows:
 
@@ -134,6 +137,7 @@ SARIF 2.1.0 import/export is local and does not require an account. SonarQube is
 - [Proposed architecture](docs/architecture.md)
 - [Draft data contracts](docs/contracts.md)
 - [CLI usage and contracts](docs/cli.md)
+- [Official setup Agent Skill](skills/quality-audit-kit-setup/SKILL.md)
 - [Initialization templates](docs/templates.md)
 - [MVP specification](docs/mvp.md)
 - [Roadmap and exit criteria](docs/roadmap.md)

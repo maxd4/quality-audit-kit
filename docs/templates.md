@@ -21,6 +21,8 @@ Each file contains exactly one `QAK:BEGIN GENERATED` / `QAK:END GENERATED` block
 
 `context refresh` is the fact-only update path. It replaces only `DETECTED_FACTS` in `PROJECT_HANDOFF.md` and `DETECTED_CONTROLS` in `COMMIT_REVIEW.md`; the generic protocol, instructions, manual context and decisions remain unchanged. It reports changed fields and exits with status 2 when an explicit human field contradicts a newly detected fact. In that case both the human decision and the observed value are retained.
 
+`setup` composes the same protected initialization with an optional explicit answers file. It never asks an AI provider to write implicitly: an agent or human must inspect the real repository and provide `projectHandoffGenerated` and/or `commitReviewGenerated`, then resume with `setup --resume state.json --answers answers.json`. The setup state records whether personalization was applied, what remains unknown and which questions require a second pass.
+
 If one of the documents does not exist, the command returns `NOT_INITIALIZED` instead of treating missing context as up to date; run `init` explicitly.
 
 ## Optional Codex handoff

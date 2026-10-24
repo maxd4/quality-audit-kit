@@ -162,6 +162,128 @@ test('init works on an empty repository without inventing project facts', () => 
   }
 });
 
+test('setup creates a resumable partial state without scanners or network access', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const result = runCli(repository, ['setup']);
+    assert.equal(result.status, 2, `${result.stderr}\n${result.stdout}`);
+    const state = JSON.parse(result.stdout);
+    assert.equal(state.status, 'PARTIAL');
+    assert.deepEqual(state.steps.map((step) => [step.id, step.status]), [
+      ['DISCOVERY', 'COMPLETE'],
+      ['INITIALIZATION', 'COMPLETE'],
+      ['PERSONALIZATION', 'PARTIAL'],
+      ['AUDIT', 'PARTIAL'],
+      ['REPORT', 'COMPLETE'],
+      ['SUMMARY', 'COMPLETE'],
+    ]);
+    for (const file of ['quality-audit-kit.config.json', 'PROJECT_HANDOFF.md', 'COMMIT_REVIEW.md', 'quality-audit-kit.setup.run.json', 'quality-audit-kit.setup.report.md', 'quality-audit-kit.setup.json']) {
+      assert.equal(fs.existsSync(path.join(repository, file)), true, file);
+      assert.equal(state.files.some((entry) => entry.path === path.join(repository, file)), true, file);
+    }
+    assert.ok(state.capabilities.unavailable.some((entry) => entry.startsWith('scanner:knip')));
+    assert.ok(state.capabilities.unavailable.some((entry) => entry.startsWith('scanner:jscpd')));
+    assert.ok(state.capabilities.unavailable.includes('network connectors: not requested by setup'));
+    assert.match(state.humanActions.join('\n'), /answers file/);
+    assert.doesNotMatch(JSON.stringify(state), /npm install|npx|SONAR_TOKEN|password/i);
+
+    const rerun = runCli(repository, ['setup']);
+    assert.equal(rerun.status, 1);
+    assert.match(rerun.stderr, /setup --resume/);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('setup preserves an existing configuration, templates, AGENTS.md and permissions', () => {
+  const repository = makeRepository('setup-configured-fixture');
+  try {
+    assert.equal(runCli(repository, ['init']).status, 0);
+    const agentsPath = path.join(repository, 'AGENTS.md');
+    const agentsContent = '# Existing project instructions\n\nKeep this file unchanged.\n';
+    fs.writeFileSync(agentsPath, agentsContent, 'utf8');
+    fs.writeFileSync(path.join(repository, 'knip-report.json'), JSON.stringify({
+      issues: [{ file: 'packages/app/src.js', exports: [{ name: 'unused', line: 4 }] }],
+    }), 'utf8');
+    fs.writeFileSync(path.join(repository, 'jscpd-report.json'), JSON.stringify({ duplicates: [] }), 'utf8');
+    const configPath = path.join(repository, 'quality-audit-kit.config.json');
+    const configBefore = fs.readFileSync(configPath, 'utf8');
+    const modeBefore = fs.statSync(configPath).mode & 0o7777;
+
+    const result = runCli(repository, ['setup']);
+    assert.equal(result.status, 2, `${result.stderr}\n${result.stdout}`);
+    const state = JSON.parse(result.stdout);
+    assert.equal(state.status, 'PARTIAL');
+    assert.equal(state.steps.find((step) => step.id === 'AUDIT').status, 'COMPLETE');
+    assert.equal(state.steps.find((step) => step.id === 'INITIALIZATION').status, 'COMPLETE');
+    assert.equal(fs.readFileSync(agentsPath, 'utf8'), agentsContent);
+    assert.equal(fs.readFileSync(configPath, 'utf8'), configBefore);
+    assert.equal(fs.statSync(configPath).mode & 0o7777, modeBefore);
+    assert.ok(state.commands.some((command) => command.command.includes('scan') && command.status === 'PASS'));
+    assert.ok(state.capabilities.activated.includes('scanner:knip'));
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('setup --resume applies explicit answers once and reuses audit artifacts', () => {
+  const repository = makeRepository('setup-resume-fixture');
+  try {
+    fs.writeFileSync(path.join(repository, 'knip-report.json'), JSON.stringify({
+      issues: [{ file: 'packages/app/src.js', exports: [{ name: 'unused', line: 4 }] }],
+    }), 'utf8');
+    fs.writeFileSync(path.join(repository, 'jscpd-report.json'), JSON.stringify({ duplicates: [] }), 'utf8');
+    const first = runCli(repository, ['setup']);
+    assert.equal(first.status, 2, first.stderr);
+    const firstState = JSON.parse(first.stdout);
+    const runPath = path.join(repository, 'quality-audit-kit.setup.run.json');
+    const reportPath = path.join(repository, 'quality-audit-kit.setup.report.md');
+    const runMtime = fs.statSync(runPath).mtimeMs;
+    const reportMtime = fs.statSync(reportPath).mtimeMs;
+    const answersPath = path.join(repository, 'setup-answers.json');
+    fs.writeFileSync(answersPath, JSON.stringify({
+      projectHandoffGenerated: '## Evidence-backed project context\n\n- Purpose: fixture repository used by the setup contract tests.',
+      commitReviewGenerated: '## Evidence-backed review controls\n\n- Review: preserve the existing project instructions and require observed checks.',
+    }, null, 2), 'utf8');
+
+    const resumed = runCli(repository, ['setup', '--resume', firstState.statePath, '--answers', answersPath]);
+    assert.equal(resumed.status, 0, `${resumed.stderr}\n${resumed.stdout}`);
+    const state = JSON.parse(resumed.stdout);
+    assert.equal(state.status, 'COMPLETE');
+    assert.equal(state.resumed, true);
+    assert.equal(state.steps.find((step) => step.id === 'PERSONALIZATION').status, 'COMPLETE');
+    assert.equal(state.steps.find((step) => step.id === 'AUDIT').result.source, 'REUSED_EXISTING');
+    assert.equal(state.steps.find((step) => step.id === 'REPORT').status, 'COMPLETE');
+    assert.ok(state.commands.some((command) => command.status === 'REUSED'));
+    assert.equal(fs.statSync(runPath).mtimeMs, runMtime);
+    assert.equal(fs.statSync(reportPath).mtimeMs, reportMtime);
+    assert.match(fs.readFileSync(path.join(repository, 'PROJECT_HANDOFF.md'), 'utf8'), /Evidence-backed project context/);
+    assert.match(fs.readFileSync(path.join(repository, 'COMMIT_REVIEW.md'), 'utf8'), /Evidence-backed review controls/);
+    assert.deepEqual(state.questions, []);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('setup preserves an unmanaged project instruction without overwriting it', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const handoffPath = path.join(repository, 'PROJECT_HANDOFF.md');
+    const original = '# Maintainer-owned handoff\n\nDo not rewrite this document.\n';
+    fs.writeFileSync(handoffPath, original, 'utf8');
+    const result = runCli(repository, ['setup']);
+    assert.equal(result.status, 2);
+    const state = JSON.parse(result.stdout);
+    assert.equal(state.status, 'PARTIAL');
+    assert.equal(state.steps.find((step) => step.id === 'INITIALIZATION').status, 'COMPLETE');
+    assert.equal(fs.readFileSync(handoffPath, 'utf8'), original);
+    assert.equal(fs.existsSync(path.join(repository, 'quality-audit-kit.setup.run.json')), true);
+    assert.match(state.humanActions.join('\n'), /answers file/);
+  } finally {
+    cleanup(repository);
+  }
+});
+
 test('template refresh previews and preserves manual decisions idempotently', () => {
   const repository = makeRepository('template-refresh-fixture');
   try {

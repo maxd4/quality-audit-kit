@@ -45,6 +45,9 @@ const SCANNERS = ['knip', 'jscpd'];
 const CONFIG_FILENAME = 'quality-audit-kit.config.json';
 const DEFAULT_BASELINE_FILENAME = 'quality-audit-kit.baseline.json';
 const DEFAULT_DECISIONS_FILENAME = 'quality-audit-kit.decisions.json';
+const SETUP_STATE_FILENAME = 'quality-audit-kit.setup.json';
+const SETUP_RUN_FILENAME = 'quality-audit-kit.setup.run.json';
+const SETUP_REPORT_FILENAME = 'quality-audit-kit.setup.report.md';
 
 function parseArguments(argv) {
   const [command = 'help', ...tokens] = argv;
@@ -514,7 +517,7 @@ async function scanCommand(positional, options) {
   const content = `${JSON.stringify(run, null, 2)}\n`;
   const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
   if (outputPath) writeOutput(outputPath, content);
-  else process.stdout.write(content);
+  else if (options.emit !== false) process.stdout.write(content);
   if (engines.some((engine) => ['FAILURE', 'PARTIAL'].includes(engine.measurementStatus))
     || run.comparison?.status === 'NOT_EVALUATED'
     || ['FAIL', 'NOT_EVALUATED'].includes(run.qualityGate?.status)) process.exitCode = 2;
@@ -623,7 +626,7 @@ function initCommand(positional, options) {
       : 'EXISTING_UNCHANGED';
   if (!options.preview && (options.force || !configExists)) writeJson(configPath, config);
   const templates = initTemplates(target, discovery, options);
-  process.stdout.write(`${JSON.stringify({
+  const result = {
     command: 'init',
     config: CONFIG_FILENAME,
     configStatus,
@@ -632,8 +635,10 @@ function initCommand(positional, options) {
     workspaces: discovery.workspaces,
     scanners: discovery.scanners,
     templates,
-  }, null, 2)}\n`);
+  };
+  if (options.emit !== false) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (templates.files.some((file) => file.status === 'BLOCKED')) process.exitCode = 2;
+  return result;
 }
 
 function contextRefreshCommand(positional, options) {
@@ -1093,7 +1098,7 @@ function reportCommand(positional, options) {
   if (bundlePath) createBundle(run, resolvedInput, bundlePath, options);
   if (format === 'zip') {
     process.stdout.write(`Offline bundle written: ${bundlePath}\n`);
-    return;
+    return { command: 'report', status: 'WRITTEN', format, input: resolvedInput, output: bundlePath };
   }
   const content = format === 'json'
     ? `${JSON.stringify(buildStructuredReport(run), null, 2)}\n`
@@ -1101,7 +1106,269 @@ function reportCommand(positional, options) {
     : format === 'markdown' ? renderMarkdown(run) : renderTerminal(run);
   const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
   if (outputPath) writeOutput(outputPath, content);
-  else process.stdout.write(content);
+  else if (options.emit !== false) process.stdout.write(content);
+  return { command: 'report', status: outputPath ? 'WRITTEN' : 'EMITTED', format, input: resolvedInput, output: outputPath };
+}
+
+const SETUP_STEP_IDS = ['DISCOVERY', 'INITIALIZATION', 'PERSONALIZATION', 'AUDIT', 'REPORT', 'SUMMARY'];
+const SETUP_FINAL_STATUSES = new Set(['IN_PROGRESS', 'COMPLETE', 'PARTIAL', 'BLOCKED']);
+
+function setupPathInsideRepository(root, value, fallback) {
+  const selected = value === undefined || value === true ? fallback : String(value);
+  const candidate = path.resolve(path.isAbsolute(selected) ? selected : path.resolve(process.cwd(), selected));
+  const relative = path.relative(root, candidate);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error('setup artifact paths must remain inside the analyzed repository.');
+  }
+  return candidate;
+}
+
+function validateSetupState(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('Setup state must contain a JSON object.');
+  if (state.schemaVersion !== '0.1-draft' || state.setupVersion !== '0.1-draft' || state.command !== 'setup') {
+    throw new Error('Setup state contract version or command is invalid.');
+  }
+  if (!state.repository || typeof state.repository.root !== 'string' || !path.isAbsolute(state.repository.root)) {
+    throw new Error('Setup state must contain an absolute repository root.');
+  }
+  if (!SETUP_FINAL_STATUSES.has(state.status)) throw new Error('Setup state status is invalid.');
+  if (!Array.isArray(state.steps) || !Array.isArray(state.commands) || !Array.isArray(state.files)) {
+    throw new Error('Setup state collections are invalid.');
+  }
+  return state;
+}
+
+function setupStep(state, id, status, result, extra = {}) {
+  const step = { id, status, ...extra, ...(result === undefined ? {} : { result }) };
+  state.steps = [...state.steps.filter((entry) => entry.id !== id), step];
+  state.steps.sort((left, right) => SETUP_STEP_IDS.indexOf(left.id) - SETUP_STEP_IDS.indexOf(right.id));
+}
+
+function setupFile(state, filePath, status, role) {
+  const absolutePath = path.resolve(filePath);
+  const existing = state.files.find((file) => file.path === absolutePath);
+  if (existing) {
+    existing.status = status;
+    existing.role = role || existing.role;
+    return;
+  }
+  state.files.push({ path: absolutePath, status, ...(role ? { role } : {}) });
+}
+
+function setupCommandRecord(state, command, args, exitCode, observed, status) {
+  state.commands.push({
+    command: ['quality-audit-kit', command, ...args].join(' '),
+    status: status || (exitCode === 0 ? 'PASS' : exitCode === 2 ? 'PARTIAL' : 'FAILURE'),
+    exitCode,
+    observed,
+  });
+}
+
+function setupObservedInit(result) {
+  return {
+    configStatus: result.configStatus,
+    templates: result.templates.files.map(({ file, status, reason }) => ({ file, status, ...(reason ? { reason } : {}) })),
+    agent: result.templates.agent,
+  };
+}
+
+function setupObservedRun(run) {
+  return {
+    runId: run.runId,
+    engines: (run.engines || []).map(({ name, measurementStatus, gateOutcome, sourceRevision }) => ({ name, measurementStatus, gateOutcome, sourceRevision })),
+    findingCount: Array.isArray(run.findings) ? run.findings.length : 0,
+    reproducible: run.reproducible,
+  };
+}
+
+async function setupInvoke(fn) {
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    const result = await fn();
+    return { result, exitCode: process.exitCode || 0 };
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+}
+
+function setupInitialState(target, statePath, resumed) {
+  return {
+    schemaVersion: '0.1-draft',
+    setupVersion: '0.1-draft',
+    command: 'setup',
+    status: 'IN_PROGRESS',
+    resumed,
+    repository: { root: target, name: null },
+    statePath,
+    steps: [],
+    commands: [],
+    files: [],
+    artifacts: {},
+    capabilities: { activated: [], unavailable: [], unverified: [] },
+    missingInformation: [],
+    humanActions: [],
+    questions: [],
+  };
+}
+
+function setupCapabilitySummary(run, personalizationComplete) {
+  const activated = ['repository discovery', 'deterministic initialization', 'local Markdown report generation', 'offline operation'];
+  const unavailable = [];
+  const unverified = [];
+  for (const engine of run?.engines || []) {
+    if (engine.measurementStatus === 'MEASURED') activated.push(`scanner:${engine.name}`);
+    else unavailable.push(`scanner:${engine.name} (${engine.measurementStatus || 'UNKNOWN'})`);
+    if (engine.sourceRevision?.status !== 'VERIFIED') unverified.push(`source revision:${engine.name}`);
+  }
+  if (!personalizationComplete) unverified.push('semantic project personalization');
+  unavailable.push('network connectors: not requested by setup');
+  return { activated, unavailable, unverified };
+}
+
+function setupQuestions() {
+  return [
+    'What purpose, users and runtime boundary are directly demonstrated by the repository sources and documentation?',
+    'Which files are authoritative for behavior, configuration, security and deployment, and what evidence supports each choice?',
+    'Which checks should a human explicitly approve for a second pass, especially when no local scanner or test evidence was available?',
+  ];
+}
+
+async function setupCommand(positional, options) {
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  let state = null;
+  let target;
+  let statePath;
+  let currentStep = 'DISCOVERY';
+  try {
+    const resumeValue = options.resume;
+    if (resumeValue !== undefined && resumeValue !== true) {
+      const candidate = path.resolve(process.cwd(), String(resumeValue));
+      const prior = validateSetupState(readJson(candidate));
+      target = path.resolve(prior.repository.root);
+      statePath = setupPathInsideRepository(target, candidate, SETUP_STATE_FILENAME);
+      state = { ...prior, resumed: true, statePath };
+    } else {
+      target = findRepositoryRoot(positional[0] || process.cwd());
+      statePath = setupPathInsideRepository(target, options.state || options.output, SETUP_STATE_FILENAME);
+      if (fs.existsSync(statePath)) throw new Error(`A setup state already exists at ${statePath}; use setup --resume ${statePath}.`);
+      state = setupInitialState(target, statePath, false);
+    }
+
+    const discovery = discover(target);
+    state.repository = { root: target, name: discovery.repositoryName, git: discovery.git };
+    setupStep(state, 'DISCOVERY', 'COMPLETE', {
+      packageManager: discovery.packageManager,
+      languages: discovery.languages,
+      scanners: discovery.scanners,
+      projectFiles: discovery.projectFiles,
+    });
+
+    currentStep = 'INITIALIZATION';
+    const initCall = await setupInvoke(() => initCommand([target], { emit: false, templates: 'deterministic' }));
+    const initResult = initCall.result;
+    setupCommandRecord(state, 'init', [target], initCall.exitCode, setupObservedInit(initResult));
+    setupFile(state, path.join(target, CONFIG_FILENAME), initResult.configStatus === 'WRITTEN' ? 'CREATED' : 'EXISTING_UNCHANGED', 'configuration');
+    for (const file of initResult.templates.files) setupFile(state, path.join(target, file.file), file.status, 'template');
+    setupStep(state, 'INITIALIZATION', initResult.templates.files.some((file) => file.status === 'BLOCKED') ? 'BLOCKED' : 'COMPLETE', setupObservedInit(initResult));
+    if (initResult.templates.files.some((file) => file.status === 'BLOCKED')) throw new Error('Initialization was blocked by an unmanaged or malformed project document.');
+
+    currentStep = 'PERSONALIZATION';
+    const answersPath = options.answers === undefined ? null : path.resolve(process.cwd(), String(options.answers));
+    let personalizationComplete = Boolean(state.steps.find((step) => step.id === 'PERSONALIZATION')?.status === 'COMPLETE' && !answersPath);
+    if (answersPath) {
+      if (!fs.existsSync(answersPath)) throw new Error(`Setup answers file does not exist: ${answersPath}`);
+      const answerCall = await setupInvoke(() => initCommand([target], {
+        emit: false,
+        templates: 'deterministic',
+        agent: 'codex',
+        'agent-input': answersPath,
+        'update-templates': true,
+      }));
+      const answerResult = answerCall.result;
+      setupCommandRecord(state, 'init', [target, '--agent codex', `--agent-input ${answersPath}`, '--update-templates'], answerCall.exitCode, setupObservedInit(answerResult));
+      for (const file of answerResult.templates.files) setupFile(state, path.join(target, file.file), file.status, 'personalized-template');
+      personalizationComplete = answerResult.templates.agent?.status === 'APPLIED_FROM_EXPLICIT_INPUT';
+      if (!personalizationComplete) throw new Error('The explicit setup answers were not applied to the managed template blocks.');
+    }
+    setupStep(state, 'PERSONALIZATION', personalizationComplete ? 'COMPLETE' : 'PARTIAL', {
+      status: personalizationComplete ? 'APPLIED_FROM_EXPLICIT_INPUT' : 'PENDING_AGENT_OR_HUMAN_INPUT',
+      answers: answersPath ? { path: answersPath, status: 'READ_AND_APPLIED' } : null,
+    }, personalizationComplete ? {} : { questions: setupQuestions() });
+
+    currentStep = 'AUDIT';
+    const runPath = state.artifacts.runPath
+      ? path.resolve(state.artifacts.runPath)
+      : setupPathInsideRepository(target, undefined, SETUP_RUN_FILENAME);
+    let run;
+    let auditObservedStatus = 'EXECUTED';
+    if (fs.existsSync(runPath)) {
+      run = readJson(runPath);
+      auditObservedStatus = 'REUSED_EXISTING';
+    } else {
+      const scanArgs = [target, '--output', runPath];
+      if (options.run !== undefined) scanArgs.push(options.run === true ? '--run' : `--run=${options.run}`);
+      const scanCall = await setupInvoke(() => scanCommand([target], { output: runPath, run: options.run, emit: false }));
+      run = scanCall.result;
+      setupCommandRecord(state, 'scan', scanArgs, scanCall.exitCode, setupObservedRun(run));
+    }
+    state.artifacts.runPath = runPath;
+    setupFile(state, runPath, auditObservedStatus === 'REUSED_EXISTING' ? 'REUSED_EXISTING' : 'CREATED', 'audit-run');
+    const measured = Array.isArray(run.engines) && run.engines.length > 0 && run.engines.every((engine) => engine.measurementStatus === 'MEASURED');
+    setupStep(state, 'AUDIT', measured ? 'COMPLETE' : 'PARTIAL', { ...setupObservedRun(run), status: measured ? 'MEASURED' : 'INCOMPLETE_MEASUREMENTS', source: auditObservedStatus });
+    if (auditObservedStatus === 'REUSED_EXISTING') setupCommandRecord(state, 'scan', [target, '--output', runPath], 0, { ...setupObservedRun(run), source: 'REUSED_EXISTING' }, 'REUSED');
+
+    currentStep = 'REPORT';
+    const reportPath = state.artifacts.reportPath
+      ? path.resolve(state.artifacts.reportPath)
+      : setupPathInsideRepository(target, undefined, SETUP_REPORT_FILENAME);
+    let reportResult;
+    if (fs.existsSync(reportPath)) {
+      reportResult = { command: 'report', status: 'REUSED_EXISTING', format: 'markdown', input: runPath, output: reportPath };
+      setupCommandRecord(state, 'report', [runPath, '--format markdown', '--output', reportPath], 0, reportResult, 'REUSED');
+    } else {
+      const reportCall = await setupInvoke(() => reportCommand([runPath], { format: 'markdown', output: reportPath, emit: false }));
+      reportResult = reportCall.result;
+      setupCommandRecord(state, 'report', [runPath, '--format markdown', '--output', reportPath], reportCall.exitCode, reportResult);
+    }
+    state.artifacts.reportPath = reportPath;
+    setupFile(state, reportPath, reportResult.status === 'REUSED_EXISTING' ? 'REUSED_EXISTING' : 'CREATED', 'report');
+    setupStep(state, 'REPORT', 'COMPLETE', reportResult);
+
+    state.capabilities = setupCapabilitySummary(run, personalizationComplete);
+    state.missingInformation = personalizationComplete ? [] : ['Repository purpose, authoritative sources and approved second-pass checks are not demonstrated in the managed generated blocks.'];
+    state.humanActions = [
+      ...(personalizationComplete ? [] : [`Inspect the real repository and provide a JSON answers file with projectHandoffGenerated and/or commitReviewGenerated, then run setup --resume ${statePath} --answers <file>.`]),
+      ...(!measured ? ['Provide or explicitly approve local analyzer reports or locally installed scanners; setup never installs scanners and never contacts a network service.'] : []),
+    ];
+    state.questions = personalizationComplete ? (!measured ? setupQuestions().slice(2) : []) : setupQuestions();
+    state.status = personalizationComplete && measured ? 'COMPLETE' : 'PARTIAL';
+  } catch (error) {
+    if (!state) {
+      process.exitCode = previousExitCode;
+      throw error;
+    }
+    setupStep(state, currentStep, 'BLOCKED', { message: error.message }, { error: error.message });
+    state.status = 'BLOCKED';
+    state.capabilities = state.capabilities || { activated: [], unavailable: [], unverified: [] };
+    state.missingInformation = [...new Set([...(state.missingInformation || []), error.message])];
+    state.humanActions = [...new Set([...(state.humanActions || []), `Resolve the blocked ${currentStep.toLowerCase()} step and resume from ${state.statePath}.`])];
+    state.questions = state.questions?.length ? state.questions : setupQuestions();
+  }
+
+  state.updatedAt = new Date().toISOString();
+  setupStep(state, 'SUMMARY', 'COMPLETE', {
+    status: state.status,
+    files: state.files,
+    commands: state.commands.length,
+    capabilities: state.capabilities,
+  });
+  setupFile(state, state.statePath, fs.existsSync(state.statePath) ? 'UPDATED' : 'CREATED', 'setup-state');
+  writeJsonAtomicReplace(state.statePath, state);
+  process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
+  process.exitCode = state.status === 'COMPLETE' ? 0 : 2;
+  return state;
 }
 
 function clonesCommand(positional, options) {
@@ -1242,6 +1509,7 @@ function thresholdsCommand(positional, options) {
 }
 
 const COMMAND_HELP = {
+  setup: 'quality-audit-kit setup [repository] [--state file] [--answers file] [--run[=knip,jscpd]]\nquality-audit-kit setup --resume state.json [--answers file]\n  Orchestrates discovery, protected initialization, optional explicit personalization, local scan and Markdown report.\n  Returns a resumable COMPLETE, PARTIAL or BLOCKED JSON state; it never installs analyzers or contacts a service.',
   init: 'quality-audit-kit init [repository] [--force] [--preview]\n  Creates a minimal config and protected generic project templates. Existing files stay unchanged by default.',
   scan: 'quality-audit-kit scan [repository] [--run[=knip,jscpd]] [--output run.json]\n  Imports existing reports by default; --run only executes analyzers already installed in the target repository.',
   report: 'quality-audit-kit report run.json [--format terminal|markdown|json|sarif|zip] [--output file]\n  Renders evidence without computing a global quality score or overwriting an existing output.',
@@ -1254,6 +1522,34 @@ const COMMAND_HELP = {
 
 function printCompactHelp(command) {
   const version = require('../package.json').version;
+  if (!command) {
+    process.stdout.write([
+      'Quality Audit Kit ' + version + ' (experimental)',
+      '',
+      'Usage:',
+      '  quality-audit-kit <command> [options]',
+      '',
+      'Core workflow:',
+      '  setup       Orchestrate discovery, initialization, audit, report and resumable status',
+      '  init        Create minimal local configuration and templates',
+      '  scan        Import or explicitly run local analyzer reports',
+      '  report      Render terminal, Markdown, JSON, SARIF or offline ZIP evidence',
+      '  plan        Build bounded correction lots and prompts',
+      '  thresholds  Recommend or explicitly apply policy thresholds',
+      '  fix         Preview or execute one approved correction lot',
+      '  verify      Verify correction evidence without executing anything',
+      '',
+      'Quick start:',
+      '  quality-audit-kit setup .',
+      '  quality-audit-kit init .',
+      '  quality-audit-kit scan . --run --output run.json',
+      '  quality-audit-kit report run.json --format markdown --output report.md',
+      '',
+      'Use quality-audit-kit <command> --help for concise command help. The CLI never installs analyzers, contacts an agent, publishes a package or changes normative policy without explicit flags.',
+      '',
+    ].join('\n'));
+    return;
+  }
   if (command && COMMAND_HELP[command]) {
     process.stdout.write(`Quality Audit Kit ${version} (experimental)\n\n${COMMAND_HELP[command]}\n`);
     return;
@@ -1265,6 +1561,7 @@ async function main(argv) {
   const { command, options, positional } = parseArguments(argv);
   if (options.help || command === 'help' || command === '--help') { printCompactHelp(command === 'help' || command === '--help' ? null : command); return; }
   if (options.version || command === '--version') return process.stdout.write(`${require('../package.json').version}\n`);
+  if (command === 'setup') return setupCommand(positional, options);
   if (command === 'init') return initCommand(positional, options);
   if (command === 'context') {
     if (positional[0] !== 'refresh') throw new Error('context requires the refresh subcommand.');

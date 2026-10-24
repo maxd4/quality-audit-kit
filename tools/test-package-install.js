@@ -37,6 +37,8 @@ function main() {
     const installed = runNpm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock', tarball], consumer);
     const executable = path.join(consumer, 'node_modules', 'quality-audit-kit', 'bin', 'quality-audit-kit.js');
     assert.equal(fs.existsSync(executable), true, 'installed package must contain its executable');
+    assert.equal(fs.existsSync(path.join(consumer, 'node_modules', 'quality-audit-kit', 'skills', 'quality-audit-kit-setup', 'SKILL.md')), true, 'installed package must contain the official setup skill');
+    assert.equal(fs.existsSync(path.join(consumer, 'node_modules', 'quality-audit-kit', 'schemas', 'setup-state.schema.json')), true, 'installed package must contain the setup state contract');
     const help = spawnSync(process.execPath, [executable, '--help'], { cwd: consumer, encoding: 'utf8', windowsHide: true });
     assert.equal(help.status, 0, `installed executable --help failed: ${help.stderr}`);
     assert.match(help.stdout, /quality-audit-kit init/);

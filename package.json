@@ -8,6 +8,7 @@
     "bin",
     "src",
     "schemas",
+    "skills",
     "docs",
     "examples",
     "README.md",
