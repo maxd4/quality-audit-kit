@@ -108,6 +108,7 @@
     if (total === null || pageIndex === null || pageSize === null) diagnostics.push(diagnostic('PAGINATION_METADATA_UNAVAILABLE', '/api/issues/search', 'SonarQube did not return complete paging metadata; the export cannot claim completeness.'));
     if (pageIndex !== null && pageIndex !== requestedPage) diagnostics.push(diagnostic('PAGINATION_PAGE_MISMATCH', `/api/issues/search?p=${requestedPage}`, `SonarQube returned page ${pageIndex} for requested page ${requestedPage}.`));
     if (pageSize !== null && pageSize < 1) diagnostics.push(diagnostic('PAGINATION_PAGE_SIZE_INVALID', `/api/issues/search?p=${requestedPage}`, 'SonarQube returned an invalid page size.'));
+    if (pageSize !== null && pageSize !== requestedSize) diagnostics.push(diagnostic('PAGINATION_PAGE_SIZE_MISMATCH', `/api/issues/search?p=${requestedPage}`, `SonarQube returned pageSize ${pageSize}, but the request asked for ${requestedSize}.`));
     if (pageSize !== null && pageSize > requestedSize) diagnostics.push(diagnostic('PAGINATION_PAGE_SIZE_UNEXPECTED', `/api/issues/search?p=${requestedPage}`, 'SonarQube returned more issues than requested; completeness is not assumed.'));
     if (issues && issues.length > requestedSize) diagnostics.push(diagnostic('PAGINATION_ISSUES_OVER_REQUEST', `/api/issues/search?p=${requestedPage}`, `SonarQube returned ${issues.length} issues for a request of ${requestedSize}; only the requested bound is retained.`));
     return { issues: issues || [], paging: paging || null, total, diagnostics };
@@ -153,7 +154,7 @@
     let page = 1;
     const issueKeys = new Set();
     while (base.issues.pagination.exportedCount < config.maxResults && (total === null || base.issues.pagination.exportedCount < total)) {
-      const requestSize = Math.min(config.pageSize, config.maxResults - base.issues.pagination.exportedCount);
+      const requestSize = config.pageSize;
       const query = { componentKeys: config.project, p: page, ps: requestSize, ...(config.branch ? { branch: config.branch } : {}), ...(config.pullRequest ? { pullRequest: config.pullRequest } : {}) };
       let response;
       try {
@@ -164,8 +165,13 @@
         break;
       }
       const assessment = issuePageAssessment(response, page, requestSize);
-      const pageIssues = assessment.issues.slice(0, requestSize);
+      const remaining = config.maxResults - base.issues.pagination.exportedCount;
+      const pageIssues = assessment.issues.slice(0, Math.min(remaining, requestSize));
       if (assessment.diagnostics.length) partial = true;
+      if (assessment.issues.length > pageIssues.length && remaining < requestSize) {
+        partial = true;
+        base.diagnostics.push(diagnostic('RESULT_LIMIT_TRUNCATED_PAGE', `/api/issues/search?p=${page}`, `The final stored page was truncated from ${assessment.issues.length} to ${pageIssues.length} issues to respect the configured limit ${config.maxResults}.`));
+      }
       const storedResponse = assessment.issues.length > pageIssues.length ? { ...response, issues: pageIssues } : response;
       base.issues.pages.push({ request: query, response: storedResponse });
       base.issues.pagination.pageCount = base.issues.pages.length;

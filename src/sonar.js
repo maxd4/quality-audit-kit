@@ -283,7 +283,8 @@ function importSonarExport(root, filePath) {
   const requestedLimit = Number.isInteger(pagination?.requestedLimit) ? pagination.requestedLimit : null;
   const effectiveLimit = requestedLimit !== null && requestedLimit >= 1 && requestedLimit <= MAX_RESULTS_LIMIT ? requestedLimit : MAX_RESULTS_LIMIT;
   if (requestedLimit === null || requestedLimit < 1 || requestedLimit > MAX_RESULTS_LIMIT) markIncomplete('EXPORT_LIMIT_INVALID', `The browser export must declare requestedLimit as an integer between 1 and ${MAX_RESULTS_LIMIT}.`);
-  if (!pagination || !Number.isInteger(pagination.pageSize) || pagination.pageSize < 1 || pagination.pageSize > 500) markIncomplete('EXPORT_PAGE_SIZE_INVALID', 'The browser export must declare a pageSize between 1 and 500.');
+  const declaredPageSize = Number.isInteger(pagination?.pageSize) && pagination.pageSize >= 1 && pagination.pageSize <= 500 ? pagination.pageSize : null;
+  if (declaredPageSize === null) markIncomplete('EXPORT_PAGE_SIZE_INVALID', 'The browser export must declare a pageSize between 1 and 500.');
   if (reportedTotal === null) markIncomplete('EXPORT_TOTAL_UNAVAILABLE', 'The browser export must declare a non-negative reportedTotal before it can claim completeness.');
   if (!pages.length) markIncomplete('EXPORT_PAGES_EMPTY', 'The browser export contains no issue page; an empty page list is not proof of zero findings.');
   let expectedPage = 1;
@@ -291,6 +292,10 @@ function importSonarExport(root, filePath) {
   let declaredPageCount = Number.isInteger(pagination?.pageCount) ? pagination.pageCount : null;
   if (declaredPageCount === null) markIncomplete('EXPORT_PAGE_COUNT_UNAVAILABLE', 'The browser export must declare pageCount so the stored page set can be checked.');
   else if (declaredPageCount !== pages.length) markIncomplete('EXPORT_PAGE_COUNT_MISMATCH', `The browser export declares ${declaredPageCount} pages but contains ${pages.length}.`);
+  if (reportedTotal !== null && declaredPageSize !== null) {
+    const expectedPageCount = Math.max(1, Math.ceil(Math.min(reportedTotal, effectiveLimit) / declaredPageSize));
+    if (pages.length !== expectedPageCount) markIncomplete('EXPORT_PAGE_COUNT_UNEXPECTED', `The browser export contains ${pages.length} pages, but ${expectedPageCount} pages are required for the declared total and page size.`);
+  }
   for (const [index, page] of pages.entries()) {
     const response = page?.response;
     const pageIndex = response?.paging?.pageIndex;
@@ -305,6 +310,8 @@ function importSonarExport(root, filePath) {
     if (requestPage === null || requestPage !== pageIndex) markIncomplete('EXPORT_REQUEST_PAGE_MISMATCH', 'The stored issue request does not identify the same page as its response.', reference);
     if (requestSize === null || requestSize < 1 || requestSize > 500) markIncomplete('EXPORT_REQUEST_PAGE_SIZE_INVALID', 'The stored issue request does not contain a valid page size.', reference);
     if (!Number.isInteger(responsePageSize) || responsePageSize < 1 || responsePageSize > 500) markIncomplete('EXPORT_RESPONSE_PAGE_SIZE_INVALID', 'The issue response does not contain a valid pageSize.', reference);
+    if (declaredPageSize !== null && requestSize !== null && requestSize !== declaredPageSize) markIncomplete('EXPORT_REQUEST_PAGE_SIZE_CHANGED', `The stored issue request used pageSize ${requestSize}, but the export declares a stable pageSize of ${declaredPageSize}.`, reference);
+    if (declaredPageSize !== null && Number.isInteger(responsePageSize) && responsePageSize !== declaredPageSize) markIncomplete('EXPORT_RESPONSE_PAGE_SIZE_CHANGED', `The issue response used pageSize ${responsePageSize}, but the export declares a stable pageSize of ${declaredPageSize}.`, reference);
     if (requestSize !== null && Number.isInteger(responsePageSize) && responsePageSize !== requestSize) markIncomplete('EXPORT_PAGE_SIZE_MISMATCH', `The issue response pageSize ${responsePageSize} does not match the requested page size ${requestSize}.`, reference);
     if (!Array.isArray(pageIssues)) {
       markIncomplete('EXPORT_ISSUES_NOT_ARRAY', 'The browser export contains a page whose issues field is not an array.', reference);
@@ -313,6 +320,9 @@ function importSonarExport(root, filePath) {
     if (!Number.isInteger(responseTotal) || responseTotal < 0) markIncomplete('EXPORT_RESPONSE_TOTAL_INVALID', 'The issue response does not contain a valid total.', reference);
     else if (reportedTotal !== null && responseTotal !== reportedTotal) markIncomplete('PAGINATION_TOTAL_CHANGED', 'SonarQube reported a total that differs from the export total.', reference);
     if (requestSize !== null && pageIssues.length > requestSize) markIncomplete('EXPORT_ISSUES_OVER_REQUEST', `The stored issue page contains ${pageIssues.length} issues for a request of ${requestSize}.`, reference);
+    const isStoredFinalPage = index === pages.length - 1;
+    const limitTruncatedFinalPage = reportedTotal !== null && reportedTotal > effectiveLimit && isStoredFinalPage && actualCount + pageIssues.length >= effectiveLimit;
+    if (declaredPageSize !== null && pageIssues.length < declaredPageSize && !isStoredFinalPage && !limitTruncatedFinalPage) markIncomplete('EXPORT_PAGE_SHORT_BEFORE_FINAL', 'An intermediate issue page is shorter than the declared page size; the stored pages do not prove continuous coverage.', reference);
     const remaining = Math.max(0, effectiveLimit - actualCount);
     const accepted = pageIssues.slice(0, Math.min(remaining, requestSize || pageIssues.length));
     if (accepted.length < pageIssues.length) markIncomplete('EXPORT_RESULT_LIMIT_ENFORCED', `The imported issue page exceeded the effective limit ${effectiveLimit}; excess issues were not imported.`, reference);
@@ -344,7 +354,7 @@ function importSonarExport(root, filePath) {
   const analysis = Array.isArray(analysisResponse?.analyses) ? analysisResponse.analyses[0] || null : null;
   const sourceRevision = analysisRevision(analysis);
   const reference = `sonarqube://${encodeURIComponent(source.project)}/browser-export`;
-  const normalized = normalizeSonar(root, issues, { kind: 'EXPORT', reference, sourceRevision, measurementStatus: status });
+  const normalized = normalizeSonar(root, issues, { kind: 'REPORT', reference, sourceRevision, measurementStatus: status });
   const allDiagnostics = [...diagnostics, ...normalized.diagnostics];
   const branch = source.branch || null;
   const pullRequest = source.pullRequest || null;

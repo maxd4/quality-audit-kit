@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const vm = require('node:vm');
 const test = require('node:test');
 
@@ -61,6 +62,11 @@ test('SonarQube browser exporter paginates same-origin simulated responses witho
   const exporter = loadExporter();
   const calls = [];
   const location = { origin: 'https://sonar.example.invalid', href: 'https://sonar.example.invalid/project/overview?id=demo-project&branch=main' };
+  const orderedIssues = [
+    { key: 'ISSUE-1', rule: 'js:Rule', severity: 'MAJOR', component: 'demo-project:src/a.js', line: 3, message: 'First issue' },
+    { key: 'ISSUE-2', rule: 'js:Rule', severity: 'MINOR', component: 'demo-project:src/b.js', line: 4, message: 'Second issue' },
+    { key: 'ISSUE-3', rule: 'js:Rule', severity: 'INFO', component: 'demo-project:src/c.js', message: 'Third issue' },
+  ];
   const fetch = async (url, init) => {
     const parsed = new URL(url);
     calls.push({ parsed, init });
@@ -72,11 +78,11 @@ test('SonarQube browser exporter paginates same-origin simulated responses witho
     if (parsed.pathname === '/api/server/version') return response('10.6.0.92116');
     if (parsed.pathname === '/api/issues/search') {
       const page = Number(parsed.searchParams.get('p'));
+      const pageSize = Number(parsed.searchParams.get('ps'));
+      const offset = (page - 1) * pageSize;
       return response(JSON.stringify({
-        paging: { total: 3, pageIndex: page, pageSize: Number(parsed.searchParams.get('ps')) },
-        issues: page === 1
-          ? [{ key: 'ISSUE-1', rule: 'js:Rule', severity: 'MAJOR', component: 'demo-project:src/a.js', line: 3, message: 'First issue' }, { key: 'ISSUE-2', rule: 'js:Rule', severity: 'MINOR', component: 'demo-project:src/b.js', line: 4, message: 'Second issue' }]
-          : [{ key: 'ISSUE-3', rule: 'js:Rule', severity: 'INFO', component: 'demo-project:src/c.js', message: 'Third issue' }],
+        paging: { total: orderedIssues.length, pageIndex: page, pageSize },
+        issues: orderedIssues.slice(offset, offset + pageSize),
       }));
     }
     if (parsed.pathname === '/api/project_analyses/search') return response(JSON.stringify({ analyses: [{ key: 'analysis-1', revision: 'b'.repeat(40), date: '2026-10-24T12:00:00+0000' }] }));
@@ -91,12 +97,64 @@ test('SonarQube browser exporter paginates same-origin simulated responses witho
   assert.equal(exported.issues.pagination.exportedCount, 3);
   assert.equal(exported.issues.pagination.pageCount, 2);
   assert.equal(exported.issues.pagination.status, 'COMPLETE');
+  assert.deepEqual(Array.from(exported.issues.pages.flatMap((item) => item.response.issues).map((issue) => issue.key)), ['ISSUE-1', 'ISSUE-2', 'ISSUE-3']);
+  assert.deepEqual(Array.from(exported.issues.pages.map((item) => item.request.ps)), [2, 2]);
   assert.equal(exported.analysis.selected.revision, 'b'.repeat(40));
   assert.equal(calls.filter((call) => call.parsed.pathname === '/api/issues/search').length, 2);
   assert.equal(/document\.cookie|localStorage|sessionStorage/.test(fs.readFileSync(SCRIPT, 'utf8')), false);
   assert.doesNotMatch(JSON.stringify(exported), /secret|authorization/i);
   const repeated = await exporter.collect({ maxResults: 3, pageSize: 2 }, { location, fetch, now: () => '2026-10-24T12:00:00.000Z' });
   assert.deepEqual(repeated, exported);
+});
+
+test('browser exporter keeps API page size stable while bounding only stored issues', async () => {
+  const exporter = loadExporter();
+  const location = { origin: 'https://sonar.example.invalid', href: 'https://sonar.example.invalid/project/overview?id=demo-project' };
+  const ordered = Array.from({ length: 11 }, (_, index) => ({ key: `ISSUE-${index + 1}` }));
+  const collectOrdered = async (maxResults, pageSize, items = ordered) => {
+    const requested = [];
+    const exported = await exporter.collect({ maxResults, pageSize }, {
+      location,
+      fetch: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname === '/api/server/version') return response('10.6.0.92116');
+        if (parsed.pathname === '/api/issues/search') {
+          const page = Number(parsed.searchParams.get('p'));
+          const ps = Number(parsed.searchParams.get('ps'));
+          requested.push({ page, ps });
+          const start = (page - 1) * ps;
+          return response(JSON.stringify({ paging: { total: items.length, pageIndex: page, pageSize: ps }, issues: items.slice(start, start + ps) }));
+        }
+        if (parsed.pathname === '/api/project_analyses/search') return response(JSON.stringify({ analyses: [] }));
+        throw new Error(`unexpected endpoint ${parsed.pathname}`);
+      },
+      now: () => '2026-10-24T12:00:00.000Z',
+    });
+    return { exported, requested };
+  };
+
+  const complete = await collectOrdered(11, 5);
+  assert.equal(complete.exported.status, 'MEASURED');
+  assert.deepEqual(Array.from(complete.exported.issues.pages.flatMap((page) => page.response.issues).map((issue) => issue.key)), ordered.map((issue) => issue.key));
+  assert.deepEqual(complete.requested.map((request) => request.ps), [5, 5, 5]);
+  assert.equal(complete.exported.issues.pages.at(-1).response.issues.length, 1);
+
+  const limited = await collectOrdered(7, 5);
+  assert.equal(limited.exported.status, 'PARTIAL');
+  assert.equal(limited.exported.issues.pagination.exportedCount, 7);
+  assert.deepEqual(Array.from(limited.exported.issues.pages.flatMap((page) => page.response.issues).map((issue) => issue.key)), ordered.slice(0, 7).map((issue) => issue.key));
+  assert.deepEqual(limited.requested.map((request) => request.ps), [5, 5]);
+  assert.ok(limited.exported.diagnostics.some((item) => item.code === 'RESULT_LIMIT_REACHED'));
+  assert.ok(limited.exported.diagnostics.some((item) => item.code === 'RESULT_LIMIT_TRUNCATED_PAGE'));
+
+  const zero = await collectOrdered(7, 5, []);
+  assert.equal(zero.exported.status, 'MEASURED');
+  assert.equal(zero.exported.issues.pagination.exportedCount, 0);
+  assert.equal(zero.requested.length, 1);
+
+  const small = await collectOrdered(7, 5, ordered.slice(0, 3));
+  assert.equal(small.exported.status, 'MEASURED');
+  assert.deepEqual(small.requested.map((request) => request.ps), [5]);
 });
 
 test('browser exporter makes pagination diagnostics force PARTIAL and preserves only the requested bound', async () => {
@@ -121,6 +179,10 @@ test('browser exporter makes pagination diagnostics force PARTIAL and preserves 
   assert.equal(oversized.issues.pages[0].response.issues.length, 1);
   assert.ok(oversized.diagnostics.some((item) => item.code === 'PAGINATION_PAGE_SIZE_UNEXPECTED'));
   assert.ok(oversized.diagnostics.some((item) => item.code === 'PAGINATION_ISSUES_OVER_REQUEST'));
+
+  const undersized = await collectWith({ paging: { total: 1, pageIndex: 1, pageSize: 1 }, issues: [{ key: 'ISSUE-1' }] }, { maxResults: 2, pageSize: 2 });
+  assert.equal(undersized.status, 'PARTIAL');
+  assert.ok(undersized.diagnostics.some((item) => item.code === 'PAGINATION_PAGE_SIZE_MISMATCH'));
 
   const missingSize = await collectWith({ paging: { total: 1, pageIndex: 1 }, issues: [{ key: 'ISSUE-1' }] });
   assert.equal(missingSize.status, 'PARTIAL');
@@ -233,6 +295,78 @@ test('browser export importer refuses missing page metadata, counter drift and n
     assert.notEqual(imported.sourceRevision.status, 'VERIFIED');
   } finally {
     fs.rmSync(malformed.repository, { recursive: true, force: true });
+  }
+});
+
+test('browser export importer requires stable page sizes and continuous page coverage', () => {
+  const issueA = { key: 'ISSUE-A', component: 'demo-project:src/a.js', message: 'A' };
+  const issueB = { key: 'ISSUE-B', component: 'demo-project:src/b.js', message: 'B' };
+  const issueC = { key: 'ISSUE-C', component: 'demo-project:src/c.js', message: 'C' };
+  const valid = writeBrowserPayload(browserPayload({
+    pages: [issuePage(1, 2, 3, [issueA, issueB], 2), issuePage(2, 2, 3, [issueC], 2)],
+    reportedTotal: 3,
+    pageSize: 2,
+  }));
+  const variable = writeBrowserPayload(browserPayload({
+    pages: [issuePage(1, 2, 3, [issueA, issueB], 2), issuePage(2, 1, 3, [issueC], 1)],
+    reportedTotal: 3,
+    pageSize: 2,
+  }));
+  const shortIntermediate = writeBrowserPayload(browserPayload({
+    pages: [issuePage(1, 2, 3, [issueA], 2), issuePage(2, 2, 3, [issueB, issueC], 2)],
+    reportedTotal: 3,
+    pageSize: 2,
+  }));
+  const missing = writeBrowserPayload(browserPayload({
+    pages: [issuePage(1, 2, 3, [issueA, issueB], 2), issuePage(3, 2, 3, [issueC], 2)],
+    reportedTotal: 3,
+    pageSize: 2,
+  }));
+  try {
+    const validImported = importSonarExport(valid.repository, valid.filePath);
+    assert.equal(validImported.status, 'MEASURED');
+    assert.equal(validImported.findings.length, 3);
+
+    const variableImported = importSonarExport(variable.repository, variable.filePath);
+    assert.notEqual(variableImported.status, 'MEASURED');
+    assert.ok(variableImported.diagnostics.some((item) => item.code === 'EXPORT_REQUEST_PAGE_SIZE_CHANGED'));
+
+    const shortImported = importSonarExport(shortIntermediate.repository, shortIntermediate.filePath);
+    assert.notEqual(shortImported.status, 'MEASURED');
+    assert.ok(shortImported.diagnostics.some((item) => item.code === 'EXPORT_PAGE_SHORT_BEFORE_FINAL'));
+
+    const missingImported = importSonarExport(missing.repository, missing.filePath);
+    assert.notEqual(missingImported.status, 'MEASURED');
+    assert.ok(missingImported.diagnostics.some((item) => item.code === 'EXPORT_PAGINATION_PAGE_MISMATCH'));
+  } finally {
+    for (const item of [valid, variable, shortIntermediate, missing]) fs.rmSync(item.repository, { recursive: true, force: true });
+  }
+});
+
+test('CLI imports a browser export and renders a coherent offline report', () => {
+  const issue = { key: 'ISSUE-CLI', component: 'demo-project:src/a.js', rule: 'js:Rule', severity: 'MAJOR', line: 3, message: 'CLI issue' };
+  const fixture = writeBrowserPayload(browserPayload({
+    pages: [issuePage(1, 2, 1, [issue], 2)],
+    reportedTotal: 1,
+    pageSize: 2,
+  }));
+  const runPath = path.join(fixture.repository, 'sonar-run.json');
+  const reportPath = path.join(fixture.repository, 'sonar-report.json');
+  try {
+    const imported = spawnSync(process.execPath, [path.join(ROOT, 'bin', 'quality-audit-kit.js'), 'import', 'sonar-export', fixture.filePath, '--repository', fixture.repository, '--output', runPath], { cwd: ROOT, encoding: 'utf8' });
+    assert.equal(imported.status, 0, imported.stderr);
+    const run = JSON.parse(fs.readFileSync(runPath, 'utf8'));
+    assert.equal(run.engines[0].measurementStatus, 'MEASURED');
+    assert.equal(run.findings[0].provenance.kind, 'REPORT');
+    assert.equal('measurementStatus' in run.findings[0].provenance, false);
+
+    const reported = spawnSync(process.execPath, [path.join(ROOT, 'bin', 'quality-audit-kit.js'), 'report', runPath, '--format', 'json', '--output', reportPath], { cwd: ROOT, encoding: 'utf8' });
+    assert.equal(reported.status, 0, reported.stderr);
+    const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.equal(report.measurements[0].measurementStatus, 'MEASURED');
+    assert.equal(report.findings.unclassified.length, 1);
+  } finally {
+    fs.rmSync(fixture.repository, { recursive: true, force: true });
   }
 });
 

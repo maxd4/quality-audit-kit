@@ -332,6 +332,7 @@ function normalizeSonar(root, issues, provenance) {
   if (!Array.isArray(issues)) throw new Error('SonarQube issues must be an array.');
   const diagnostics = [];
   const findings = [];
+  const { measurementStatus, ...findingProvenance } = provenance || {};
   const severityMap = { BLOCKER: 'CRITICAL', CRITICAL: 'CRITICAL', MAJOR: 'HIGH', MINOR: 'MEDIUM', INFO: 'INFO' };
   for (const [index, issue] of issues.entries()) {
     const reference = `sonarqube://issues/${encodeURIComponent(String(issue?.key || index))}`;
@@ -352,9 +353,9 @@ function normalizeSonar(root, issues, provenance) {
       severityValue: severityMap[String(issue?.severity || '').toUpperCase()] || issue?.severity,
       message: String(issue?.message || issue?.rule || 'SonarQube issue'),
       locus: issue?.key || `${issue?.rule || 'sonar-issue'}:${issue?.message || index}`,
-      provenance,
+      provenance: findingProvenance,
       rawReference: reference,
-      measurementStatus: provenance.measurementStatus || 'MEASURED',
+      measurementStatus: measurementStatus || 'MEASURED',
     }));
   }
   return { findings, diagnostics };
