@@ -818,6 +818,7 @@ test('plan export validates prompt paths before writing and preserves destinatio
   const repository = makeEmptyRepository();
   try {
     const run = measuredRun({ runId: 'plan-export-0001', seed: 'a', findings: [{ id: 'plan-export-finding', path: 'src/a.js', message: 'export fixture' }] });
+    run.findings.push({ id: 'plan-export-finding-2', path: 'src/b.js', message: 'export fixture 2' });
     fs.writeFileSync(path.join(repository, 'run.json'), `${JSON.stringify(run, null, 2)}\n`);
     const created = runCli(repository, ['plan', 'run.json', '--output', 'plan.json', '--markdown', 'plan.md']);
     assert.equal(created.status, 0, `${created.stderr}\n${created.stdout}`);
@@ -857,6 +858,33 @@ test('plan export validates prompt paths before writing and preserves destinatio
     const malformedNext = runCli(repository, ['plan', '--next', 'malformed.json']);
     assert.notEqual(malformedNext.status, 0);
     assert.equal(fs.existsSync(path.join(repository, 'prompts-malformed')), false);
+
+    const incoherentPlans = [
+      ['duplicate-lot', (plan) => { plan.prompts[1].lotId = plan.prompts[0].lotId; }],
+      ['missing-prompt', (plan) => { plan.prompts.pop(); }],
+      ['priority-mismatch', (plan) => { plan.prompts[0].priority += 1; }],
+      ['category-mismatch', (plan) => { plan.prompts[0].category = 'REGRESSION'; }],
+      ['content-mismatch', (plan) => { plan.prompts[0].content = 'contradictory prompt content'; }],
+    ];
+    for (const [name, mutate] of incoherentPlans) {
+      const incoherent = JSON.parse(JSON.stringify(originalPlan));
+      mutate(incoherent);
+      const incoherentPath = path.join(repository, `${name}.json`);
+      const exportDirectory = path.join(repository, `prompts-${name}`);
+      fs.writeFileSync(incoherentPath, `${JSON.stringify(incoherent, null, 2)}\n`);
+      const rejectedExport = runCli(repository, ['plan', '--export', path.basename(incoherentPath), '--output', path.basename(exportDirectory)]);
+      assert.notEqual(rejectedExport.status, 0, name);
+      assert.equal(fs.existsSync(exportDirectory), false, `${name} created an export directory`);
+    }
+
+    const nextIncoherent = JSON.parse(JSON.stringify(originalPlan));
+    nextIncoherent.prompts[1].lotId = nextIncoherent.prompts[0].lotId;
+    fs.writeFileSync(path.join(repository, 'next-incoherent.json'), `${JSON.stringify(nextIncoherent, null, 2)}\n`);
+    const rejectedNext = runCli(repository, ['plan', '--next', 'next-incoherent.json']);
+    assert.notEqual(rejectedNext.status, 0);
+    const rejectedFix = runCli(repository, ['fix', '--next', 'next-incoherent.json', '--output', 'fix-incoherent.json']);
+    assert.notEqual(rejectedFix.status, 0);
+    assert.equal(fs.existsSync(path.join(repository, 'fix-incoherent.json')), false);
 
     const existing = JSON.parse(JSON.stringify(originalPlan));
     const existingPath = path.join(repository, 'existing.json');

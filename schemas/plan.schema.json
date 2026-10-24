@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/quality-audit-kit/plan.schema.json",
   "title": "Quality Audit Kit correction plan",
-  "description": "Deterministic correction lots and autonomous prompts derived from one audit run.",
+  "description": "Deterministic correction lots and autonomous prompts derived from one audit run. The CLI additionally enforces the one-to-one lot/prompt relationship and equality of lotId, priority, category and prompt content.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -78,6 +78,20 @@
         }
       }
     },
-    "prompts": { "type": "array", "items": { "type": "object" } }
+    "prompts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["lotId", "priority", "category", "fileName", "content"],
+        "properties": {
+          "lotId": { "type": "string", "pattern": "^lot-[a-f0-9]{16}$" },
+          "priority": { "type": "integer", "minimum": 1 },
+          "category": { "type": "string" },
+          "fileName": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.md$" },
+          "content": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
   }
 }

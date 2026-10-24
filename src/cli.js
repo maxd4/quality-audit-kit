@@ -265,6 +265,7 @@ function validatePlanStructure(plan) {
   if (!plan.ordering || typeof plan.ordering !== 'object' || plan.ordering.noOpaqueScore !== true || typeof plan.ordering.rule !== 'string' || !Array.isArray(plan.ordering.categories)) throw new Error('Plan ordering contract is invalid.');
   if (!Array.isArray(plan.measurementFailures) || !Array.isArray(plan.warnings) || !plan.warnings.every((item) => typeof item === 'string') || !Array.isArray(plan.excludedFindings) || !Array.isArray(plan.dependencyCycles) || !plan.dependencyCycles.every((cycle) => Array.isArray(cycle) && cycle.every((item) => typeof item === 'string')) || !Array.isArray(plan.lots) || !Array.isArray(plan.prompts)) throw new Error('Plan collections are invalid.');
   const lotIds = new Set();
+  const lotsById = new Map();
   const priorities = new Set();
   for (const lot of plan.lots) {
     if (!lot || typeof lot !== 'object' || Array.isArray(lot)) throw new Error('Plan contains an invalid correction lot.');
@@ -273,18 +274,27 @@ function validatePlanStructure(plan) {
     if (!LOT_STATUSES.has(lot.status) || !Number.isInteger(lot.priority) || lot.priority < 1 || priorities.has(lot.priority)) throw new Error('Plan contains an invalid or duplicate lot priority.');
     if (!Array.isArray(lot.findings) || !Array.isArray(lot.files) || !lot.files.every((file) => typeof file === 'string') || !Array.isArray(lot.dependencies) || !Array.isArray(lot.dependencyReasons) || !Array.isArray(lot.unresolvedDependencies) || !Array.isArray(lot.rationale) || !Array.isArray(lot.invariants) || !Array.isArray(lot.checks) || !Array.isArray(lot.relationEvidence) || typeof lot.prompt !== 'string' || typeof lot.objective !== 'string' || typeof lot.stopCondition !== 'string') throw new Error(`Correction lot ${lot.id} has an invalid structure.`);
     lotIds.add(lot.id);
+    lotsById.set(lot.id, lot);
     priorities.add(lot.priority);
   }
   const promptNames = new Set();
   if (plan.prompts.length !== plan.lots.length) throw new Error('Plan prompt and lot counts do not agree.');
+  const promptsByLot = new Map();
   for (const prompt of plan.prompts) {
     if (!prompt || typeof prompt !== 'object' || Array.isArray(prompt)) throw new Error('Plan contains an invalid prompt.');
     exactKeys(prompt, PROMPT_KEYS, 'Plan prompt');
-    if (!lotIds.has(prompt.lotId) || !Number.isInteger(prompt.priority) || prompt.priority < 1 || typeof prompt.category !== 'string' || typeof prompt.content !== 'string' || !prompt.content) throw new Error('Plan prompt metadata is invalid.');
+    const lot = lotsById.get(prompt.lotId);
+    if (!lot || !Number.isInteger(prompt.priority) || prompt.priority < 1 || typeof prompt.category !== 'string' || typeof prompt.content !== 'string' || !prompt.content) throw new Error('Plan prompt metadata is invalid.');
+    if (promptsByLot.has(prompt.lotId)) throw new Error(`Plan lot ${prompt.lotId} must have exactly one prompt.`);
+    if (prompt.priority !== lot.priority) throw new Error(`Plan prompt priority does not match lot ${prompt.lotId}.`);
+    if (prompt.category !== lot.category) throw new Error(`Plan prompt category does not match lot ${prompt.lotId}.`);
+    if (prompt.content !== lot.prompt) throw new Error(`Plan prompt content does not match lot ${prompt.lotId}.`);
+    promptsByLot.set(prompt.lotId, prompt);
     if (!isSafePromptFileName(prompt.fileName)) throw new Error(`Plan prompt filename is unsafe: ${String(prompt.fileName)}`);
     if (promptNames.has(promptFileKey(prompt.fileName))) throw new Error(`Plan contains duplicate prompt filename: ${prompt.fileName}`);
     promptNames.add(promptFileKey(prompt.fileName));
   }
+  for (const lot of plan.lots) if (!promptsByLot.has(lot.id)) throw new Error(`Plan lot ${lot.id} must have exactly one prompt.`);
   return plan;
 }
 
