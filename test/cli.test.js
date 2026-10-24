@@ -233,6 +233,7 @@ test('setup --resume applies explicit answers once and reuses audit artifacts', 
       issues: [{ file: 'packages/app/src.js', exports: [{ name: 'unused', line: 4 }] }],
     }), 'utf8');
     fs.writeFileSync(path.join(repository, 'jscpd-report.json'), JSON.stringify({ duplicates: [] }), 'utf8');
+    initializeGit(repository);
     const first = runCli(repository, ['setup']);
     assert.equal(first.status, 2, first.stderr);
     const firstState = JSON.parse(first.stdout);
@@ -250,6 +251,9 @@ test('setup --resume applies explicit answers once and reuses audit artifacts', 
     assert.equal(resumed.status, 0, `${resumed.stderr}\n${resumed.stdout}`);
     const state = JSON.parse(resumed.stdout);
     assert.equal(state.status, 'COMPLETE');
+    assert.equal(state.audit.action, 'REUSED_EXISTING');
+    assert.equal(state.audit.freshness.status, 'CURRENT_CONTEXT_MATCH');
+    assert.equal(state.audit.reportAssociation, 'MATCHED');
     assert.equal(state.resumed, true);
     assert.equal(state.steps.find((step) => step.id === 'PERSONALIZATION').status, 'COMPLETE');
     assert.equal(state.steps.find((step) => step.id === 'AUDIT').result.source, 'REUSED_EXISTING');
@@ -260,6 +264,180 @@ test('setup --resume applies explicit answers once and reuses audit artifacts', 
     assert.match(fs.readFileSync(path.join(repository, 'PROJECT_HANDOFF.md'), 'utf8'), /Evidence-backed project context/);
     assert.match(fs.readFileSync(path.join(repository, 'COMMIT_REVIEW.md'), 'utf8'), /Evidence-backed review controls/);
     assert.deepEqual(state.questions, []);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('setup --resume --run executes authorized scanners into new artifacts without overwriting the prior audit', () => {
+  const repository = makeRepository('setup-explicit-run-fixture');
+  try {
+    const binDirectory = path.join(repository, 'node_modules', '.bin');
+    fs.mkdirSync(binDirectory, { recursive: true });
+    const commands = {
+      knip: '{"issues":[{"file":"src.js","exports":[{"name":"unused","line":1}]}]}',
+      jscpd: '{"duplicates":[]}',
+    };
+    for (const [name, output] of Object.entries(commands)) {
+      if (process.platform === 'win32') {
+        fs.writeFileSync(path.join(binDirectory, `${name}.cmd`), `@echo ${output}\r\n`);
+      } else {
+        const file = path.join(binDirectory, name);
+        fs.writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${output}'\n`);
+        fs.chmodSync(file, 0o755);
+      }
+    }
+    initializeGit(repository);
+    const first = runCli(repository, ['setup']);
+    assert.equal(first.status, 2, first.stderr);
+    const firstState = JSON.parse(first.stdout);
+    const oldRunPath = firstState.artifacts.runPath;
+    const oldReportPath = firstState.artifacts.reportPath;
+    const resumed = runCli(repository, ['setup', '--resume', firstState.statePath, '--run=knip,jscpd']);
+    assert.equal(resumed.status, 2, `${resumed.stderr}\n${resumed.stdout}`);
+    const state = JSON.parse(resumed.stdout);
+    const run = JSON.parse(fs.readFileSync(state.artifacts.runPath, 'utf8'));
+    assert.equal(state.audit.action, 'EXECUTED_NEW');
+    assert.notEqual(state.artifacts.runPath, oldRunPath);
+    assert.notEqual(state.artifacts.reportPath, oldReportPath);
+    assert.equal(fs.existsSync(oldRunPath), true);
+    assert.equal(fs.existsSync(oldReportPath), true);
+    assert.equal(run.engines.every((engine) => engine.measurementStatus === 'MEASURED'), true, JSON.stringify(run.engines));
+    assert.ok(state.commands.some((command) => command.command.includes('--run=knip,jscpd') && command.status === 'PASS'));
+    assert.equal(state.artifacts.reportRunId, run.runId);
+    assert.equal(state.artifacts.reportAssociation, 'MATCHED');
+    assert.ok(state.auditHistory.some((entry) => entry.path === oldRunPath && entry.status === 'PRESERVED'));
+    assert.ok(state.auditHistory.some((entry) => entry.path === oldReportPath && entry.status === 'PRESERVED'));
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('setup rejects invalid reused runs and does not turn missing provenance into COMPLETE', () => {
+  const repository = makeRepository('setup-invalid-run-fixture');
+  try {
+    initializeGit(repository);
+    const first = runCli(repository, ['setup']);
+    assert.equal(first.status, 2, first.stderr);
+    const state = JSON.parse(first.stdout);
+    const runPath = state.artifacts.runPath;
+    const reportPath = state.artifacts.reportPath;
+    const reportBefore = fs.readFileSync(reportPath, 'utf8');
+    fs.writeFileSync(runPath, `${JSON.stringify({
+      schemaVersion: '0.1-draft',
+      repository: { name: 'setup-invalid-run-fixture' },
+      inputScope: 'WORKTREE_LIVE',
+      reproducible: true,
+      engines: [{ name: 'knip', measurementStatus: 'MEASURED', gateOutcome: 'PASS' }],
+      findings: [],
+    }, null, 2)}\n`, 'utf8');
+    const resumed = runCli(repository, ['setup', '--resume', state.statePath]);
+    assert.equal(resumed.status, 2, `${resumed.stderr}\n${resumed.stdout}`);
+    const blocked = JSON.parse(resumed.stdout);
+    assert.equal(blocked.status, 'BLOCKED');
+    assert.match(blocked.missingInformation.join('\n'), /Existing setup run is invalid|run contract|runId|sourceRevision/i);
+    assert.equal(fs.readFileSync(reportPath, 'utf8'), reportBefore);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('setup refuses a reused run attributed to another repository', () => {
+  const repository = makeRepository('setup-foreign-run-fixture');
+  try {
+    initializeGit(repository);
+    const first = runCli(repository, ['setup']);
+    assert.equal(first.status, 2, first.stderr);
+    const state = JSON.parse(first.stdout);
+    const runPath = state.artifacts.runPath;
+    const run = JSON.parse(fs.readFileSync(runPath, 'utf8'));
+    run.repository.name = 'another-repository';
+    fs.writeFileSync(runPath, `${JSON.stringify(run, null, 2)}\n`, 'utf8');
+    const resumed = runCli(repository, ['setup', '--resume', state.statePath]);
+    assert.equal(resumed.status, 2, `${resumed.stderr}\n${resumed.stdout}`);
+    const blocked = JSON.parse(resumed.stdout);
+    assert.equal(blocked.status, 'BLOCKED');
+    assert.match(blocked.missingInformation.join('\n'), /belongs to repository|another-repository/i);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('setup regenerates a report when the selected run changed and preserves the old report', () => {
+  const repository = makeRepository('setup-report-association-fixture');
+  try {
+    fs.writeFileSync(path.join(repository, 'knip-report.json'), JSON.stringify({ issues: [] }), 'utf8');
+    fs.writeFileSync(path.join(repository, 'jscpd-report.json'), JSON.stringify({ duplicates: [] }), 'utf8');
+    initializeGit(repository);
+    const first = runCli(repository, ['setup']);
+    assert.equal(first.status, 2, first.stderr);
+    const firstState = JSON.parse(first.stdout);
+    const oldRunPath = firstState.artifacts.runPath;
+    const oldReportPath = firstState.artifacts.reportPath;
+    const oldReport = fs.readFileSync(oldReportPath, 'utf8');
+    fs.unlinkSync(oldRunPath);
+    const resumed = runCli(repository, ['setup', '--resume', firstState.statePath]);
+    assert.equal(resumed.status, 2, `${resumed.stderr}\n${resumed.stdout}`);
+    const state = JSON.parse(resumed.stdout);
+    const run = JSON.parse(fs.readFileSync(state.artifacts.runPath, 'utf8'));
+    assert.notEqual(run.runId, firstState.audit.runId);
+    assert.notEqual(state.artifacts.reportPath, oldReportPath);
+    assert.equal(fs.readFileSync(oldReportPath, 'utf8'), oldReport);
+    assert.equal(state.artifacts.reportRunId, run.runId);
+    assert.equal(state.artifacts.reportAssociation, 'MATCHED');
+    assert.equal(state.steps.find((step) => step.id === 'REPORT').result.status, 'WRITTEN');
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('setup refuses a report whose run identity no longer matches the reused run', () => {
+  const repository = makeRepository('setup-report-run-id-fixture');
+  try {
+    fs.writeFileSync(path.join(repository, 'knip-report.json'), JSON.stringify({ issues: [] }), 'utf8');
+    fs.writeFileSync(path.join(repository, 'jscpd-report.json'), JSON.stringify({ duplicates: [] }), 'utf8');
+    initializeGit(repository);
+    const first = runCli(repository, ['setup']);
+    assert.equal(first.status, 2, first.stderr);
+    const firstState = JSON.parse(first.stdout);
+    const oldReportPath = firstState.artifacts.reportPath;
+    const oldReport = fs.readFileSync(oldReportPath, 'utf8');
+    fs.writeFileSync(oldReportPath, oldReport.replaceAll(firstState.audit.runId, 'run-report-mismatch-0001'), 'utf8');
+    const resumed = runCli(repository, ['setup', '--resume', firstState.statePath]);
+    assert.equal(resumed.status, 2, `${resumed.stderr}\n${resumed.stdout}`);
+    const state = JSON.parse(resumed.stdout);
+    assert.equal(state.audit.action, 'REUSED_EXISTING');
+    assert.notEqual(state.artifacts.reportPath, oldReportPath);
+    assert.equal(fs.readFileSync(oldReportPath, 'utf8'), oldReport.replaceAll(firstState.audit.runId, 'run-report-mismatch-0001'));
+    assert.equal(state.steps.find((step) => step.id === 'REPORT').result.status, 'WRITTEN');
+    assert.equal(state.artifacts.reportRunId, firstState.audit.runId);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('setup preserves malformed reports and refuses to reuse a stale WORKTREE_LIVE run as current', () => {
+  const repository = makeRepository('setup-stale-report-fixture');
+  try {
+    fs.writeFileSync(path.join(repository, 'knip-report.json'), JSON.stringify({ issues: [] }), 'utf8');
+    fs.writeFileSync(path.join(repository, 'jscpd-report.json'), JSON.stringify({ duplicates: [] }), 'utf8');
+    initializeGit(repository);
+    const first = runCli(repository, ['setup']);
+    assert.equal(first.status, 2, first.stderr);
+    const firstState = JSON.parse(first.stdout);
+    const oldReportPath = firstState.artifacts.reportPath;
+    fs.writeFileSync(oldReportPath, '# malformed and preserved\n', 'utf8');
+    const changedSource = path.join(repository, 'packages', 'app', 'package.json');
+    fs.writeFileSync(changedSource, '{"name":"app","changed":true}\n', 'utf8');
+    const resumed = runCli(repository, ['setup', '--resume', firstState.statePath]);
+    assert.equal(resumed.status, 2, `${resumed.stderr}\n${resumed.stdout}`);
+    const state = JSON.parse(resumed.stdout);
+    assert.equal(state.status, 'PARTIAL');
+    assert.equal(state.audit.freshness.status, 'STALE_WORKTREE');
+    assert.notEqual(state.artifacts.reportPath, oldReportPath);
+    assert.equal(fs.readFileSync(oldReportPath, 'utf8'), '# malformed and preserved\n');
+    assert.equal(state.steps.find((step) => step.id === 'REPORT').result.status, 'WRITTEN');
+    assert.ok(state.auditHistory.some((entry) => entry.path === oldReportPath && entry.reason.includes('did not match')));
   } finally {
     cleanup(repository);
   }

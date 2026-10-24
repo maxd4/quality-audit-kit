@@ -19,6 +19,7 @@ const {
   createBundle,
   renderMarkdown,
   renderTerminal,
+  validateRun,
   verifyBundle,
   writeOutput,
 } = require('./report');
@@ -1268,6 +1269,9 @@ function validateSetupState(state) {
   if (!state.artifacts || typeof state.artifacts !== 'object' || Array.isArray(state.artifacts)) {
     throw new Error('Setup state artifacts must contain a JSON object.');
   }
+  for (const [artifactName, artifactPath] of Object.entries(state.artifacts)) {
+    if (typeof artifactPath !== 'string') throw new Error(`Setup state artifacts.${artifactName} must be a string.`);
+  }
   for (const artifactName of ['runPath', 'reportPath']) {
     if (state.artifacts[artifactName] !== undefined
       && (typeof state.artifacts[artifactName] !== 'string' || !path.isAbsolute(state.artifacts[artifactName]))) {
@@ -1318,10 +1322,147 @@ function setupObservedInit(result) {
 function setupObservedRun(run) {
   return {
     runId: run.runId,
+    repository: run.repository?.name || null,
+    inputScope: run.inputScope || null,
+    reproducible: run.reproducible,
     engines: (run.engines || []).map(({ name, measurementStatus, gateOutcome, sourceRevision }) => ({ name, measurementStatus, gateOutcome, sourceRevision })),
     findingCount: Array.isArray(run.findings) ? run.findings.length : 0,
-    reproducible: run.reproducible,
   };
+}
+
+function validateSetupSourceRevision(sourceRevision, label) {
+  if (!sourceRevision || typeof sourceRevision !== 'object' || Array.isArray(sourceRevision)) {
+    throw new Error(`${label} is missing a sourceRevision contract.`);
+  }
+  if (!Object.prototype.hasOwnProperty.call(sourceRevision, 'sha')) {
+    throw new Error(`${label} is missing the sourceRevision SHA field.`);
+  }
+  if (!['VERIFIED', 'UNVERIFIED', 'UNKNOWN'].includes(sourceRevision.status)
+    || typeof sourceRevision.basis !== 'string' || !sourceRevision.basis) {
+    throw new Error(`${label} has an invalid sourceRevision contract.`);
+  }
+  if (sourceRevision.sha !== null && sourceRevision.sha !== undefined && !/^[a-f0-9]{40}$/i.test(String(sourceRevision.sha))) {
+    throw new Error(`${label} has an invalid sourceRevision SHA.`);
+  }
+  if (sourceRevision.status === 'VERIFIED' && !/^[a-f0-9]{40}$/i.test(String(sourceRevision.sha || ''))) {
+    throw new Error(`${label} claims VERIFIED without a source SHA.`);
+  }
+  if (sourceRevision.status === 'UNKNOWN' && sourceRevision.sha !== null && sourceRevision.sha !== undefined) {
+    throw new Error(`${label} claims UNKNOWN with a source SHA.`);
+  }
+}
+
+function validateSetupRun(run, discovery) {
+  validateRun(run);
+  if (run.schemaVersion !== '0.1-draft') throw new Error('Setup run contract version is invalid.');
+  if (!['COMMITTED_SNAPSHOT', 'STAGED', 'WORKTREE_LIVE'].includes(run.inputScope)) throw new Error('Setup run inputScope is invalid.');
+  if (typeof run.reproducible !== 'boolean') throw new Error('Setup run reproducible flag is invalid.');
+  if (!run.generatedAt || Number.isNaN(Date.parse(run.generatedAt))) throw new Error('Setup run generatedAt is missing or invalid.');
+  if (run.repository.name !== discovery.repositoryName) {
+    throw new Error(`Setup run belongs to repository ${run.repository.name}, not ${discovery.repositoryName}.`);
+  }
+  const engineNames = new Set();
+  for (const engine of run.engines) {
+    if (engineNames.has(engine.name)) throw new Error(`Setup run contains duplicate engine ${engine.name}.`);
+    engineNames.add(engine.name);
+    if (!['MEASURED', 'PARTIAL', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY'].includes(engine.measurementStatus)) {
+      throw new Error(`Setup run engine ${engine.name} has an invalid measurement status.`);
+    }
+    if (!['PASS', 'FAIL', 'INFORMATIVE', 'NOT_EVALUATED'].includes(engine.gateOutcome)) {
+      throw new Error(`Setup run engine ${engine.name} has an invalid gate outcome.`);
+    }
+    validateSetupSourceRevision(engine.sourceRevision, `Setup run engine ${engine.name}`);
+  }
+  const findingIds = new Set();
+  for (const finding of run.findings) {
+    if (!finding || typeof finding !== 'object' || typeof finding.id !== 'string' || finding.id.length < 8 || findingIds.has(finding.id)) {
+      throw new Error('Setup run contains a missing or duplicate finding ID.');
+    }
+    findingIds.add(finding.id);
+    for (const field of ['engine', 'ruleId', 'path', 'severity', 'message', 'lifecycle', 'measurementStatus']) {
+      if (typeof finding[field] !== 'string' || !finding[field]) throw new Error(`Setup run finding ${finding.id} is missing ${field}.`);
+    }
+    if (!['MEASURED', 'PARTIAL', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY'].includes(finding.measurementStatus)) {
+      throw new Error(`Setup run finding ${finding.id} has an invalid measurement status.`);
+    }
+    if (!['NEW', 'HISTORICAL_ACTIONABLE', 'HISTORICAL_JUSTIFIED', 'RESOLVED', 'REINTRODUCED', 'UNCLASSIFIED'].includes(finding.lifecycle)) {
+      throw new Error(`Setup run finding ${finding.id} has an invalid lifecycle.`);
+    }
+    if (!finding.provenance || typeof finding.provenance !== 'object'
+      || !['REPORT', 'EXECUTION'].includes(finding.provenance.kind)
+      || typeof finding.provenance.reference !== 'string' || !finding.provenance.reference
+      || !finding.provenance.sourceRevision) {
+      throw new Error(`Setup run finding ${finding.id} has invalid provenance.`);
+    }
+    validateSetupSourceRevision(finding.provenance.sourceRevision, `Setup run finding ${finding.id}`);
+  }
+  return run;
+}
+
+function setupNextArtifactPath(root, currentPath) {
+  const extension = path.extname(currentPath);
+  const stem = extension ? currentPath.slice(0, -extension.length) : currentPath;
+  for (let index = 1; index <= 1000; index += 1) {
+    const candidate = `${stem}.pass-${index}${extension}`;
+    setupPathInsideRepository(root, candidate, path.basename(candidate));
+    if (!fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error(`No unused setup artifact path is available beside ${currentPath}.`);
+}
+
+function setupRecordPreservedArtifact(state, filePath, role, reason) {
+  if (!fs.existsSync(filePath)) return;
+  setupFile(state, filePath, 'PRESERVED', role);
+  state.auditHistory = [...(state.auditHistory || []), { path: filePath, status: 'PRESERVED', role, reason }];
+}
+
+function setupMeaningfulWorktreeStatus(target, ignoredPaths = []) {
+  const result = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: target, encoding: 'utf8', windowsHide: true });
+  if (result.error || result.status !== 0) return 'UNKNOWN';
+  const ignored = new Set([
+    CONFIG_FILENAME,
+    'PROJECT_HANDOFF.md',
+    'COMMIT_REVIEW.md',
+    SETUP_STATE_FILENAME,
+    SETUP_RUN_FILENAME,
+    SETUP_REPORT_FILENAME,
+    ...ignoredPaths,
+  ].map((filePath) => path.relative(target, path.resolve(target, filePath)).split(path.sep).join('/')));
+  const changed = String(result.stdout || '').split(/\r?\n/).filter(Boolean).some((line) => {
+    const candidate = line.slice(3).split(' -> ').pop().trim().split(path.sep).join('/');
+    return !ignored.has(candidate);
+  });
+  return changed ? 'CHANGED' : 'CLEAN';
+}
+
+function setupRunFreshness(target, run, action, ignoredPaths = []) {
+  if (action !== 'REUSED_EXISTING') {
+    return { status: 'EXECUTED_NOW', comparability: 'CURRENT_EXECUTION', current: true, reason: 'The selected run was produced during this setup pass.' };
+  }
+  if (run.inputScope !== 'WORKTREE_LIVE') {
+    return { status: 'HISTORICAL_REUSED', comparability: 'HISTORICAL', current: false, reason: `The reused run inputScope is ${run.inputScope}.` };
+  }
+  const currentCommit = gitCommit(target);
+  const recordedCommit = run.repository.contextCommitSha || run.repository.commitSha || null;
+  if (!currentCommit || !recordedCommit) {
+    return { status: 'UNKNOWN', comparability: 'NOT_DEMONSTRATED', current: false, reason: 'The reused WORKTREE_LIVE run has no demonstrable current Git revision.' };
+  }
+  if (currentCommit !== recordedCommit) {
+    return { status: 'STALE_COMMIT', comparability: 'NOT_COMPARABLE', current: false, reason: 'The current Git commit differs from the reused run context.' };
+  }
+  const worktree = setupMeaningfulWorktreeStatus(target, ignoredPaths);
+  if (worktree !== 'CLEAN') {
+    return { status: worktree === 'CHANGED' ? 'STALE_WORKTREE' : 'UNKNOWN', comparability: 'NOT_COMPARABLE', current: false, reason: worktree === 'CHANGED' ? 'The repository has changes outside setup-managed artifacts.' : 'The current worktree state could not be demonstrated.' };
+  }
+  return { status: 'CURRENT_CONTEXT_MATCH', comparability: 'CONTEXT_MATCH_ONLY', current: true, reason: 'The Git context and relevant worktree state match the reused WORKTREE_LIVE run.' };
+}
+
+function setupReportMatchesRun(reportPath, run) {
+  try {
+    return fs.readFileSync(reportPath, 'utf8') === renderMarkdown(run);
+  } catch {
+    return false;
+  }
 }
 
 async function setupInvoke(fn) {
@@ -1348,6 +1489,7 @@ function setupInitialState(target, statePath, resumed) {
     commands: [],
     files: [],
     artifacts: {},
+    auditHistory: [],
     capabilities: { activated: [], unavailable: [], unverified: [] },
     missingInformation: [],
     humanActions: [],
@@ -1384,6 +1526,8 @@ async function setupCommand(positional, options) {
   let target;
   let statePath;
   let confinementRoot;
+  let auditComplete = false;
+  let measured = false;
   let currentStep = 'DISCOVERY';
   try {
     const resumeValue = options.resume;
@@ -1448,48 +1592,108 @@ async function setupCommand(positional, options) {
     }, personalizationComplete ? {} : { questions: setupQuestions() });
 
     currentStep = 'AUDIT';
-    const runPath = state.artifacts.runPath
+    const explicitRun = options.run !== undefined;
+    let runPath = state.artifacts.runPath
       ? setupPathInsideRepository(target, state.artifacts.runPath, SETUP_RUN_FILENAME)
       : setupPathInsideRepository(target, undefined, SETUP_RUN_FILENAME);
     let run;
     let auditObservedStatus = 'EXECUTED';
+    const existingRunPath = runPath;
+    if (explicitRun && fs.existsSync(runPath)) {
+      setupRecordPreservedArtifact(state, runPath, 'previous-audit-run', 'Explicit --run requested a new audit; the existing run was preserved.');
+      runPath = setupNextArtifactPath(target, runPath);
+      auditObservedStatus = 'EXECUTED_NEW';
+    }
     setupPathInsideRepository(target, runPath, SETUP_RUN_FILENAME);
     if (fs.existsSync(runPath)) {
       setupPathInsideRepository(target, runPath, SETUP_RUN_FILENAME);
       run = readJson(runPath);
       auditObservedStatus = 'REUSED_EXISTING';
+      try {
+        validateSetupRun(run, discovery);
+      } catch (error) {
+        throw new Error(`Existing setup run is invalid: ${error.message} Resume with --run to create a new run without overwriting it.`);
+      }
     } else {
       setupPathInsideRepository(target, runPath, SETUP_RUN_FILENAME);
       const scanArgs = [target, '--output', runPath];
       if (options.run !== undefined) scanArgs.push(options.run === true ? '--run' : `--run=${options.run}`);
       const scanCall = await setupInvoke(() => scanCommand([target], { output: runPath, run: options.run, emit: false }));
       run = scanCall.result;
+      state.artifacts.runPath = runPath;
+      setupFile(state, runPath, 'CREATED', 'audit-run');
       setupCommandRecord(state, 'scan', scanArgs, scanCall.exitCode, setupObservedRun(run));
+      validateSetupRun(run, discovery);
     }
     state.artifacts.runPath = runPath;
-    setupFile(state, runPath, auditObservedStatus === 'REUSED_EXISTING' ? 'REUSED_EXISTING' : 'CREATED', 'audit-run');
-    const measured = Array.isArray(run.engines) && run.engines.length > 0 && run.engines.every((engine) => engine.measurementStatus === 'MEASURED');
-    setupStep(state, 'AUDIT', measured ? 'COMPLETE' : 'PARTIAL', { ...setupObservedRun(run), status: measured ? 'MEASURED' : 'INCOMPLETE_MEASUREMENTS', source: auditObservedStatus });
+    if (auditObservedStatus === 'REUSED_EXISTING') setupFile(state, runPath, 'REUSED_EXISTING', 'audit-run');
+    measured = Array.isArray(run.engines) && run.engines.length > 0 && run.engines.every((engine) => engine.measurementStatus === 'MEASURED');
+    const freshnessIgnoredPaths = [
+      statePath,
+      existingRunPath,
+      ...(answersPath ? [answersPath] : []),
+      ...(state.steps.find((step) => step.id === 'PERSONALIZATION')?.result?.answers?.path
+        ? [state.steps.find((step) => step.id === 'PERSONALIZATION').result.answers.path]
+        : []),
+    ];
+    const freshness = setupRunFreshness(target, run, auditObservedStatus, freshnessIgnoredPaths);
+    auditComplete = measured && !(auditObservedStatus === 'REUSED_EXISTING' && freshness.current !== true);
+    state.audit = {
+      action: auditObservedStatus,
+      runId: run.runId,
+      runPath,
+      repository: run.repository.name,
+      inputScope: run.inputScope,
+      sourceRevisions: Object.fromEntries(run.engines.map((engine) => [engine.name, engine.sourceRevision])),
+      freshness,
+      comparability: freshness.comparability,
+    };
+    state.artifacts.runId = run.runId;
+    state.artifacts.runAction = auditObservedStatus;
+    state.artifacts.runFreshness = freshness.status;
+    setupStep(state, 'AUDIT', auditComplete ? 'COMPLETE' : 'PARTIAL', {
+      ...setupObservedRun(run),
+      status: measured ? 'MEASURED' : 'INCOMPLETE_MEASUREMENTS',
+      source: auditObservedStatus,
+      freshness,
+      comparability: freshness.comparability,
+    });
     if (auditObservedStatus === 'REUSED_EXISTING') setupCommandRecord(state, 'scan', [target, '--output', runPath], 0, { ...setupObservedRun(run), source: 'REUSED_EXISTING' }, 'REUSED');
 
     currentStep = 'REPORT';
-    const reportPath = state.artifacts.reportPath
+    let reportPath = state.artifacts.reportPath
       ? setupPathInsideRepository(target, state.artifacts.reportPath, SETUP_REPORT_FILENAME)
       : setupPathInsideRepository(target, undefined, SETUP_REPORT_FILENAME);
     let reportResult;
     setupPathInsideRepository(target, reportPath, SETUP_REPORT_FILENAME);
-    if (fs.existsSync(reportPath)) {
+    let reportReused = false;
+    if (auditObservedStatus !== 'REUSED_EXISTING' && fs.existsSync(reportPath)) {
+      setupRecordPreservedArtifact(state, reportPath, 'previous-report', 'A new run was selected; the existing report was preserved.');
+      reportPath = setupNextArtifactPath(target, reportPath);
+    }
+    if (fs.existsSync(reportPath) && setupReportMatchesRun(reportPath, run)) {
       setupPathInsideRepository(target, reportPath, SETUP_REPORT_FILENAME);
-      reportResult = { command: 'report', status: 'REUSED_EXISTING', format: 'markdown', input: runPath, output: reportPath };
+      reportReused = true;
+      reportResult = { command: 'report', status: 'REUSED_EXISTING', format: 'markdown', input: runPath, inputRunId: run.runId, runId: run.runId, association: 'MATCHED', output: reportPath };
       setupCommandRecord(state, 'report', [runPath, '--format markdown', '--output', reportPath], 0, reportResult, 'REUSED');
     } else {
+      if (fs.existsSync(reportPath)) {
+        setupRecordPreservedArtifact(state, reportPath, 'previous-report', 'The existing report did not match the selected run; the report was preserved.');
+        reportPath = setupNextArtifactPath(target, reportPath);
+      }
       setupPathInsideRepository(target, reportPath, SETUP_REPORT_FILENAME);
       const reportCall = await setupInvoke(() => reportCommand([runPath], { format: 'markdown', output: reportPath, emit: false }));
       reportResult = reportCall.result;
+      reportResult = { ...reportResult, inputRunId: run.runId, runId: run.runId, association: 'MATCHED' };
       setupCommandRecord(state, 'report', [runPath, '--format markdown', '--output', reportPath], reportCall.exitCode, reportResult);
     }
     state.artifacts.reportPath = reportPath;
-    setupFile(state, reportPath, reportResult.status === 'REUSED_EXISTING' ? 'REUSED_EXISTING' : 'CREATED', 'report');
+    state.artifacts.reportRunId = run.runId;
+    state.artifacts.reportAssociation = reportResult.association;
+    setupFile(state, reportPath, reportReused ? 'REUSED_EXISTING' : 'CREATED', 'report');
+    state.audit.reportPath = reportPath;
+    state.audit.reportRunId = run.runId;
+    state.audit.reportAssociation = reportResult.association;
     setupStep(state, 'REPORT', 'COMPLETE', reportResult);
 
     state.capabilities = setupCapabilitySummary(run, personalizationComplete);
@@ -1497,9 +1701,10 @@ async function setupCommand(positional, options) {
     state.humanActions = [
       ...(personalizationComplete ? [] : [`Inspect the real repository and provide a JSON answers file with projectHandoffGenerated and/or commitReviewGenerated, then run setup --resume ${statePath} --answers <file>.`]),
       ...(!measured ? ['Provide or explicitly approve local analyzer reports or locally installed scanners; setup never installs scanners and never contacts a network service.'] : []),
+      ...(!auditComplete && measured ? [`Do not present this reused run as a current audit: ${state.audit.freshness.reason}`] : []),
     ];
-    state.questions = personalizationComplete ? (!measured ? setupQuestions().slice(2) : []) : setupQuestions();
-    state.status = personalizationComplete && measured ? 'COMPLETE' : 'PARTIAL';
+    state.questions = personalizationComplete ? ((!measured || !auditComplete) ? setupQuestions().slice(2) : []) : setupQuestions();
+    state.status = personalizationComplete && auditComplete ? 'COMPLETE' : 'PARTIAL';
   } catch (error) {
     if (!state) {
       if (/^Setup artifact path|^Setup artifact destination/.test(error.message)) {

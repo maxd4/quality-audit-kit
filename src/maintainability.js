@@ -122,16 +122,30 @@ function discoverFiles(root, options = {}) {
   const files = [];
   const excludedFiles = [];
   const unsupportedFiles = [];
+  const errorFiles = [];
   const visited = new Set();
+
+  function recordDiscoveryError(directory, code, error) {
+    const failure = {
+      path: relativePath(root, directory),
+      status: 'FAILURE',
+      reason: `${code}: ${error.message}`,
+    };
+    excludedFiles.push(failure);
+    errorFiles.push(failure);
+  }
 
   function visit(directory) {
     let realDirectory;
-    try { realDirectory = fs.realpathSync(directory); } catch { return; }
+    try { realDirectory = fs.realpathSync(directory); } catch (error) {
+      recordDiscoveryError(directory, 'DIRECTORY_REALPATH_FAILED', error);
+      return;
+    }
     if (!isInside(root, realDirectory) || visited.has(realDirectory)) return;
     visited.add(realDirectory);
     let entries;
     try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch (error) {
-      excludedFiles.push({ path: relativePath(root, directory), status: 'FAILURE', reason: `DIRECTORY_READ_FAILED: ${error.message}` });
+      recordDiscoveryError(directory, 'DIRECTORY_READ_FAILED', error);
       return;
     }
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
@@ -163,7 +177,7 @@ function discoverFiles(root, options = {}) {
   }
 
   visit(root);
-  return { files, excludedFiles, unsupportedFiles };
+  return { files, excludedFiles, unsupportedFiles, errorFiles };
 }
 
 function isIdentifierStart(character) { return /[A-Za-z_$]/.test(character) || character === '\\u200C' || character === '\\u200D'; }
@@ -616,7 +630,14 @@ function analyzeRepository(root, options = {}) {
   coverage.eligibleFiles = discovered.files.map((file) => ({ path: file.path, language: file.language, status: 'NOT_MEASURED', functionsMeasured: 0 }));
   coverage.excludedFiles = discovered.excludedFiles;
   coverage.unsupportedFiles = discovered.unsupportedFiles;
-  const measurements = []; const diagnostics = [];
+  coverage.errorFiles = discovered.errorFiles || [];
+  const measurements = [];
+  const diagnostics = coverage.errorFiles.map((file) => ({
+    kind: 'MAINTAINABILITY_DIAGNOSTIC',
+    code: 'DISCOVERY_ERROR',
+    path: file.path,
+    message: file.reason,
+  }));
   const measuredPaths = new Set();
   for (const file of discovered.files) {
     const inventory = coverage.eligibleFiles.find((entry) => entry.path === file.path);

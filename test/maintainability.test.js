@@ -36,6 +36,10 @@ function cleanup(fixture) {
   fs.rmSync(fixture.outside, { recursive: true, force: true });
 }
 
+function cleanupRoot(root) {
+  fs.rmSync(root, { recursive: true, force: true });
+}
+
 function verifiedRevision(seed = 'a') {
   return { status: 'VERIFIED', sha: seed.repeat(40).slice(0, 40), basis: 'fixture commit' };
 }
@@ -66,6 +70,77 @@ test('maintainability measures JS, MJS, TS, TSX, arrows and nested callbacks wit
     }
   } finally {
     cleanup(fixture);
+  }
+});
+
+test('discovery failures make coverage partial without discarding valid measurements', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-maintainability-discovery-failure-'));
+  const readablePath = path.join(root, 'src', 'readable.js');
+  const blockedDirectory = path.join(root, 'blocked');
+  fs.mkdirSync(path.dirname(readablePath), { recursive: true });
+  fs.mkdirSync(blockedDirectory);
+  fs.writeFileSync(readablePath, 'export function readable(value) { return value ? 1 : 0; }\n', 'utf8');
+  const originalReaddirSync = fs.readdirSync;
+  const originalRealpathSync = fs.realpathSync;
+  try {
+    fs.readdirSync = (candidate, options) => {
+      if (path.resolve(String(candidate)) === path.resolve(blockedDirectory)) {
+        const error = new Error('synthetic access denied');
+        error.code = 'EACCES';
+        throw error;
+      }
+      return originalReaddirSync.call(fs, candidate, options);
+    };
+    const result = analyzeRepository(root);
+    assert.equal(result.status, 'PARTIAL');
+    assert.equal(result.coverage.status, 'PARTIAL');
+    assert.equal(result.coverage.measuredFiles.includes('src/readable.js'), true);
+    assert.equal(result.coverage.errorFiles.some((file) => file.path === 'blocked' && file.reason.includes('DIRECTORY_READ_FAILED')), true);
+    assert.equal(result.coverage.excludedFiles.some((file) => file.path === 'blocked' && file.status === 'FAILURE'), true);
+    assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === 'DISCOVERY_ERROR' && diagnostic.path === 'blocked'), true);
+    assert.ok(result.measurements.some((measurement) => measurement.path === 'src/readable.js'));
+  } finally {
+    fs.readdirSync = originalReaddirSync;
+    fs.realpathSync = originalRealpathSync;
+    cleanupRoot(root);
+  }
+});
+
+test('realpath discovery failures are explicit and fully failed when no file remains', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-maintainability-realpath-failure-'));
+  const blockedDirectory = path.join(root, 'blocked');
+  fs.mkdirSync(blockedDirectory);
+  const originalRealpathSync = fs.realpathSync;
+  try {
+    fs.realpathSync = (candidate) => {
+      if (path.resolve(String(candidate)) === path.resolve(blockedDirectory)) {
+        const error = new Error('synthetic realpath failure');
+        error.code = 'ELOOP';
+        throw error;
+      }
+      return originalRealpathSync.call(fs, candidate);
+    };
+    const result = analyzeRepository(root);
+    assert.equal(result.status, 'FAILURE');
+    assert.equal(result.coverage.errorFiles.some((file) => file.path === 'blocked' && file.reason.includes('DIRECTORY_REALPATH_FAILED')), true);
+    assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === 'DISCOVERY_ERROR' && diagnostic.path === 'blocked'), true);
+  } finally {
+    fs.realpathSync = originalRealpathSync;
+    cleanupRoot(root);
+  }
+});
+
+test('voluntary exclusions remain policy exclusions and do not create discovery errors', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-maintainability-policy-exclusion-'));
+  try {
+    fs.writeFileSync(path.join(root, 'kept.js'), 'export const kept = 1;\n', 'utf8');
+    fs.writeFileSync(path.join(root, 'generated.min.js'), 'export const generated = 1;\n', 'utf8');
+    const result = analyzeRepository(root);
+    assert.equal(result.status, 'MEASURED');
+    assert.deepEqual(result.coverage.errorFiles, []);
+    assert.equal(result.coverage.excludedFiles.some((file) => file.path === 'generated.min.js' && file.status === 'SKIPPED_BY_POLICY'), true);
+  } finally {
+    cleanupRoot(root);
   }
 });
 

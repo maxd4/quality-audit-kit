@@ -82,8 +82,27 @@
     },
     "artifacts": {
       "type": "object",
-      "description": "Recorded artifact paths. The CLI treats these values as untrusted and revalidates their physical containment before reuse or creation.",
+      "description": "Recorded artifact paths and run/report association metadata. The CLI treats these values as untrusted and revalidates their physical containment before reuse or creation.",
       "additionalProperties": { "type": "string" }
+    },
+    "audit": {
+      "type": "object",
+      "description": "Evidence describing the selected run, its freshness and the report association.",
+      "additionalProperties": true
+    },
+    "auditHistory": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "status", "role", "reason"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "minLength": 1 },
+          "role": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": true
+      }
     },
     "capabilities": {
       "type": "object",

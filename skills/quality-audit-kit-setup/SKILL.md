@@ -33,7 +33,7 @@ Use this workflow when the user wants Quality Audit Kit installed and configured
    node /path/to/quality-audit-kit/bin/quality-audit-kit.js setup /path/to/target-repository
    ```
 
-   The command delegates to the existing `init`, `scan` and `report` implementations. It creates or reuses a configuration, protected generic templates, `quality-audit-kit.setup.run.json`, `quality-audit-kit.setup.report.md` and the resumable `quality-audit-kit.setup.json` state. It does not overwrite an existing setup state; use `--resume` for a second pass.
+   The command delegates to the existing `init`, `scan` and `report` implementations. It creates or reuses a configuration, protected generic templates, `quality-audit-kit.setup.run.json`, `quality-audit-kit.setup.report.md` and the resumable `quality-audit-kit.setup.json` state. It does not overwrite an existing setup state; use `--resume` for a second pass. The state records the selected run, report association, freshness and preserved artifacts.
 4. Read the generated `PROJECT_HANDOFF.md`, `COMMIT_REVIEW.md`, the setup state and the real repository sources listed by discovery. Do not infer purpose, authority, security, deployment or test guarantees from filenames alone.
 5. If semantic personalization is needed, prepare a local JSON file containing only the generated blocks that are supported by direct evidence:
 
@@ -62,7 +62,7 @@ Use this workflow when the user wants Quality Audit Kit installed and configured
    ```
 
    If reports or scanners are absent, continue and report the affected capability as unavailable. Never substitute another tool or claim a clean result.
-7. On every pass, read the structured state and report the result. A resumed pass reuses existing run/report artifacts and existing decisions; it must not reinstall or silently rerun work. Ask only the precise questions still present in `state.questions`.
+7. On every pass, read the structured state and report the result. A resumed pass without `--run` may reuse a run only after the canonical contract, repository attribution, provenance and freshness checks pass; it may reuse a report only when its content is associated with that exact `runId`. An explicit `--run` is an authorization for a new scan: it never reuses the old run, preserves old run/report files, selects non-existing artifact paths and records the new run/report association. It must not reinstall dependencies or contact a service. Ask only the precise questions still present in `state.questions`.
 
 ## Handoff contract
 
@@ -77,7 +77,7 @@ The state file follows [`schemas/setup-state.schema.json`](../../schemas/setup-s
 
 Use these meanings:
 
-- `COMPLETE`: initialization, personalization, measured audit and Markdown report are all evidenced.
+- `COMPLETE`: initialization, personalization, a valid measured audit with demonstrated current/relevant freshness, and a Markdown report associated with that exact run are all evidenced.
 - `PARTIAL`: setup and report completed, but personalization, scanner evidence or another non-blocking capability remains unavailable or unverified.
 - `BLOCKED`: a protected file, invalid answer, unsafe path, permission boundary or contract error prevented a required step.
 

@@ -69,7 +69,12 @@ measured, policy-excluded, unsupported and error files, the number of distinct
 functions measured, and the parser engine/version actually used. Default
 exclusions include dependencies, generated/build artifacts, Git-ignored files,
 and symbolic links. Symbolic links are not followed, including links that
-would resolve outside the repository.
+would resolve outside the repository. Discovery failures, including directory
+read or physical-path resolution errors, are retained with relative paths in
+`errorFiles` and produce a `DISCOVERY_ERROR` diagnostic. They prevent a
+`MEASURED` coverage status: a partially measured eligible scope is `PARTIAL`,
+and a scope with no usable measurements is `FAILURE`. Voluntary exclusions
+remain `SKIPPED_BY_POLICY` and do not become discovery errors.
 
 The optional `--maintainability-report path.json` imports an already generated
 canonical report without running the analyzer. The imported file must contain
