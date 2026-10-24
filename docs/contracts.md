@@ -20,6 +20,16 @@ A run has `schemaVersion`, a unique `runId`, a `repository` context, an `inputSc
 
 `gateOutcome` is separate: `PASS`, `FAIL`, `INFORMATIVE` or `NOT_EVALUATED`. A check that was not measured cannot establish `PASS`.
 
+An opt-in maintainability run may add `functionMeasurements` and
+`maintainabilityCoverage` to the audit-run contract. The collection is
+separate from findings and is informative only. Each function metric carries
+its engine/metric versions, language, relative path, function identity and
+role, source lines, value, direction, status, provenance and evidence
+reference. Coverage lists eligible, measured, excluded, unsupported and error
+files plus the function count and parser versions. See
+[`maintainability.md`](maintainability.md) for the adapter limits and metric
+definitions.
+
 ## Finding contract
 
 Each finding has:

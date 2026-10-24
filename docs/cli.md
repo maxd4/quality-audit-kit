@@ -13,7 +13,7 @@ quality-audit-kit init [repository] [--force] [--templates deterministic|none] [
 quality-audit-kit init [repository] --agent codex [--agent-prompt file] [--agent-input file]
 quality-audit-kit init [repository] --link-agents
 quality-audit-kit context refresh [repository] [--preview]
-quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--sarif-report file] [--run[=knip,jscpd]] [--baseline file] [--decisions file]
+quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--sarif-report file] [--maintainability-report file] [--run[=knip,jscpd,maintainability]] [--baseline file] [--decisions file]
 quality-audit-kit connect sonar [--sonar-url URL] [--sonar-project KEY] [--sonar-token-env NAME|--sonar-token-file FILE]
 quality-audit-kit import sonar [repository] --sonar-url URL --sonar-project KEY [--sonar-branch NAME|--sonar-pull-request KEY] [--sonar-max-results N] [--output file]
 quality-audit-kit import sarif report.sarif [--repository repository] [--output file]
@@ -70,6 +70,8 @@ When either context document is absent, the result is `NOT_INITIALIZED` with sta
 - `jscpd-report.json`, `reports/jscpd-report.json` or `reports/jscpd.json`.
 
 The Knip adapter accepts the JSON reporter shape with grouped `issues` and issue-type arrays. The jscpd adapter accepts the JSON reporter shape with `duplicates`, `firstFile` and `secondFile`. The normalizer records the scanner, rule, repository-relative file, line when available, severity, stable ID, `UNCLASSIFIED` lifecycle, measurement status and report/execution provenance. `NEW` is reserved for a future real comparison against a baseline or history.
+
+`--run=maintainability` enables the opt-in function-level JavaScript/TypeScript adapter described in [`docs/maintainability.md`](maintainability.md). It emits `functionMeasurements` and `maintainabilityCoverage` without creating findings or changing gates. `--maintainability-report` imports those collections from an existing canonical report without rerunning analysis. A missing compatible adapter is `NOT_MEASURED` with its exact diagnostic; no dependency is installed implicitly.
 
 `--run` is the only mode that executes scanners. It resolves `node_modules/.bin/knip` and `node_modules/.bin/jscpd` in the target repository and invokes them directly. It never calls `npx`, `npm install` or a shell command supplied by the analyzed project. Exit code 1 is treated as an expected findings/threshold result for these adapters when a valid JSON report is available; other non-zero codes are `FAILURE`, even if they also emitted JSON. A partial JSON payload after a real execution error is never normalized as a complete measurement. A local scanner may still fail; that result is recorded as `FAILURE` and the command exits with status 2. A scanner that is absent, not requested or skipped is recorded as `NOT_MEASURED` with `gateOutcome: NOT_EVALUATED`.
 

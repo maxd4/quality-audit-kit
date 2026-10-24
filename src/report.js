@@ -45,11 +45,32 @@ function sourceRevisionOf(engine) {
   };
 }
 
+function validateFunctionMeasurements(run) {
+  if (run.functionMeasurements === undefined) return;
+  if (!Array.isArray(run.functionMeasurements)) throw new Error('Report functionMeasurements must be an array when present.');
+  const ids = new Set();
+  for (const measurement of run.functionMeasurements) {
+    if (!measurement || typeof measurement !== 'object' || !measurement.measurementId || ids.has(measurement.measurementId)) throw new Error('Report contains a missing or duplicate function measurement ID.');
+    ids.add(measurement.measurementId);
+    for (const field of ['engine', 'engineVersion', 'metricId', 'metricVersion', 'language', 'path', 'functionId', 'functionName', 'astRole', 'unit', 'direction', 'status', 'evidenceRef']) {
+      if (typeof measurement[field] !== 'string' || !measurement[field]) throw new Error(`Function measurement is missing ${field}.`);
+    }
+    if (!Number.isFinite(measurement.value) || measurement.value < 0) throw new Error(`Function measurement ${measurement.measurementId} has an invalid value.`);
+    if (!Number.isInteger(measurement.startLine) || measurement.startLine < 1 || !Number.isInteger(measurement.endLine) || measurement.endLine < measurement.startLine) throw new Error(`Function measurement ${measurement.measurementId} has invalid function lines.`);
+    if (measurement.status !== 'MEASURED') throw new Error(`Function measurement ${measurement.measurementId} is not MEASURED.`);
+    if (!measurement.provenance || typeof measurement.provenance !== 'object') throw new Error(`Function measurement ${measurement.measurementId} has no provenance.`);
+    const source = sourceRevisionOf(measurement.provenance);
+    if (source.status === 'VERIFIED' && !source.sha) throw new Error(`Function measurement ${measurement.measurementId} claims VERIFIED without a source SHA.`);
+  }
+  if (run.maintainabilityCoverage !== undefined && (!run.maintainabilityCoverage || typeof run.maintainabilityCoverage !== 'object')) throw new Error('Report maintainabilityCoverage must be an object when present.');
+}
+
 function validateRun(run) {
   if (!run || typeof run !== 'object') throw new Error('Report input must be a JSON object.');
   if (!/^[A-Za-z0-9_-]{8,80}$/.test(String(run.runId || ''))) throw new Error('Report runId is missing or invalid.');
   if (!run.repository || typeof run.repository !== 'object' || !run.repository.name) throw new Error('Report repository identity is missing.');
   if (!Array.isArray(run.engines) || !Array.isArray(run.findings)) throw new Error('Report must contain engines and findings arrays.');
+  validateFunctionMeasurements(run);
   const contextSha = run.repository.contextCommitSha || null;
   const legacySha = run.repository.commitSha || null;
   if (contextSha && legacySha && contextSha !== legacySha) throw new Error('Report has inconsistent contextCommitSha and commitSha values.');
@@ -134,6 +155,8 @@ function buildStructuredReport(inputRun) {
     source: { repository: run.repository.name, contextSha: run.repository.contextCommitSha || run.repository.commitSha || null, inputScope: run.inputScope, reproducible: run.reproducible, generatedAt: run.generatedAt || null },
     measurements,
     findings: buckets,
+    ...(Array.isArray(run.functionMeasurements) ? { functionMeasurements: run.functionMeasurements } : {}),
+    ...(run.maintainabilityCoverage ? { maintainabilityCoverage: run.maintainabilityCoverage } : {}),
     clones,
     measurementFailures: failures,
     recommendations: buildRecommendations(run, buckets, failures),
@@ -171,6 +194,15 @@ function renderMarkdown(run) {
     lines.push(`| ${cell(measurement.runId)} | ${cell(measurement.engine)} | ${cell(measurement.version)} | ${cell(measurement.scope)} | ${cell(measurement.sha || 'UNKNOWN')} | ${cell(measurement.validationState)} | ${cell(measurement.measurementStatus)} | ${cell(measurement.sourceRevision.status)} | ${count} | ${cell(measurement.diagnostic || '')} |`);
   }
   lines.push('', '## Discovery', '', `- Package manager: \`${cell(discovery.packageManager?.name || 'none')}\``, `- Languages: ${discovery.languages?.length ? discovery.languages.map(cell).join(', ') : 'none detected'}`, `- Workspaces: ${discovery.workspaces?.packages?.length || 0} detected`, `- Configurations: ${discovery.configurations?.length || 0}`, '');
+  if (report.maintainabilityCoverage) {
+    const coverage = report.maintainabilityCoverage;
+    lines.push('## Function maintainability', '', `- Coverage: \`${cell(coverage.status)}\``, `- Eligible files: ${coverage.eligibleFiles?.length || 0}`, `- Measured files: ${coverage.measuredFiles?.length || 0}`, `- Excluded files: ${coverage.excludedFiles?.length || 0}`, `- Unsupported files: ${coverage.unsupportedFiles?.length || 0}`, `- Error files: ${coverage.errorFiles?.length || 0}`, `- Functions measured: ${coverage.functionsMeasured || 0}`, '');
+    if (report.functionMeasurements?.length) {
+      lines.push('| File | Function | Role | Lines | Metric | Value | Status |', '| --- | --- | --- | --- | --- | ---: | --- |');
+      for (const measurement of report.functionMeasurements) lines.push(`| ${cell(measurement.path)} | ${cell(measurement.functionName)} | ${cell(measurement.astRole)} | ${measurement.startLine}-${measurement.endLine} | ${cell(measurement.metricId)} | ${measurement.value} ${cell(measurement.unit)} | ${cell(measurement.status)} |`);
+      lines.push('');
+    } else lines.push('No function measurements recorded.', '');
+  }
   if (safeRun.comparison) lines.push('## Historical comparison', '', `- Status: \`${cell(safeRun.comparison.status)}\``, `- Baseline run: \`${cell(safeRun.comparison.baselineRunId || 'UNKNOWN')}\``, `- Resolved: ${report.findings.resolved.length}`, '');
   lines.push('## Findings', '');
   lines.push(...findingTable('New', report.findings.new));
@@ -195,6 +227,7 @@ function renderTerminal(run) {
   for (const measurement of report.measurements) lines.push(`${measurement.runId} | ${measurement.engine} | ${measurement.version} | ${measurement.scope} | ${measurement.sha || 'UNKNOWN'} | ${measurement.validationState} | ${measurement.measurementStatus} | ${measurement.sourceRevision.status}`);
   const counts = Object.fromEntries(Object.entries(report.findings).map(([key, findings]) => [key, findings.length]));
   lines.push('', 'Findings', '--------', `New: ${counts.new}`, `Historical actionable: ${counts.historicalActionable}`, `Historical justified: ${counts.historicalJustified}`, `Resolved: ${counts.resolved}`, `Reintroduced: ${counts.reintroduced}`, `Unclassified: ${counts.unclassified}`);
+  if (report.maintainabilityCoverage) lines.push('', 'Function maintainability', '------------------------', `Coverage: ${report.maintainabilityCoverage.status}`, `Eligible files: ${report.maintainabilityCoverage.eligibleFiles?.length || 0}`, `Measured files: ${report.maintainabilityCoverage.measuredFiles?.length || 0}`, `Excluded files: ${report.maintainabilityCoverage.excludedFiles?.length || 0}`, `Unsupported files: ${report.maintainabilityCoverage.unsupportedFiles?.length || 0}`, `Error files: ${report.maintainabilityCoverage.errorFiles?.length || 0}`, `Functions measured: ${report.maintainabilityCoverage.functionsMeasured || 0}`, `Function measurements: ${report.functionMeasurements?.length || 0}`);
   lines.push('', 'Clone audit', '-----------', `Status: ${report.clones.status}`, `Families: ${report.clones.counts.families}`, `Unique occurrences: ${report.clones.counts.occurrences}`, `Unique pairs: ${report.clones.counts.pairs}`);
   const listed = [...report.findings.new, ...report.findings.historicalActionable, ...report.findings.historicalJustified, ...report.findings.reintroduced, ...report.findings.unclassified];
   if (listed.length) { lines.push('', 'ID | Engine | Rule | File | Severity | Lifecycle'); for (const finding of listed) lines.push(`${finding.id} | ${finding.engine} | ${finding.ruleId} | ${finding.path} | ${finding.severity} | ${finding.lifecycle}`); }

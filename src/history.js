@@ -45,6 +45,7 @@ function assessMeasuredRun(run, label = 'run') {
 
   const engineNames = new Set();
   for (const engine of run?.engines || []) {
+    if (engine.gateRelevant === false) continue;
     if (engineNames.has(engine.name)) reasons.push(`${label} contains duplicate engine ${engine.name}.`);
     engineNames.add(engine.name);
     if (engine.measurementStatus !== 'MEASURED') reasons.push(`${label} engine ${engine.name} is ${engine.measurementStatus}, not MEASURED.`);

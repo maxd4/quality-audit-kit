@@ -62,6 +62,62 @@
         "qualityState": { "type": "string" },
         "provenance": { "type": "object", "additionalProperties": true }
       }
+    },
+    "functionMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "measurementId", "engine", "engineVersion", "metricId", "metricVersion", "language", "path",
+        "functionId", "functionName", "astRole", "startLine", "endLine", "value", "unit", "direction",
+        "status", "provenance", "evidenceRef"
+      ],
+      "properties": {
+        "measurementId": { "type": "string", "minLength": 8 },
+        "engine": { "type": "string", "minLength": 1 },
+        "engineVersion": { "type": "string", "minLength": 1 },
+        "metricId": { "type": "string", "minLength": 1 },
+        "metricVersion": { "type": "string", "minLength": 1 },
+        "language": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "functionId": { "type": "string", "minLength": 1 },
+        "functionName": { "type": "string", "minLength": 1 },
+        "astRole": { "type": "string", "minLength": 1 },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": "integer", "minimum": 1 },
+        "value": { "type": "number", "minimum": 0 },
+        "unit": { "type": "string", "minLength": 1 },
+        "direction": { "enum": ["LOWER_IS_BETTER", "HIGHER_IS_BETTER"] },
+        "status": { "enum": ["MEASURED", "NOT_MEASURED", "FAILURE", "SKIPPED_BY_POLICY"] },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reference", "sourceRevision"],
+          "properties": {
+            "kind": { "enum": ["REPORT", "EXECUTION"] },
+            "reference": { "type": "string", "minLength": 1 },
+            "sourceRevision": { "$ref": "#/$defs/sourceRevision" },
+            "contentSha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" }
+          }
+        },
+        "evidenceRef": { "type": "string", "minLength": 1 }
+      }
+    },
+    "maintainabilityCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "status", "eligibleFiles", "measuredFiles", "excludedFiles", "unsupportedFiles", "errorFiles", "functionsMeasured", "engines"],
+      "properties": {
+        "schemaVersion": { "const": "0.1-draft" },
+        "status": { "enum": ["MEASURED", "PARTIAL", "NOT_MEASURED", "FAILURE", "SKIPPED_BY_POLICY"] },
+        "reason": { "type": "string" },
+        "eligibleFiles": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "measuredFiles": { "type": "array", "items": { "type": "string" } },
+        "excludedFiles": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "unsupportedFiles": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "errorFiles": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "functionsMeasured": { "type": "integer", "minimum": 0 },
+        "engines": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+      }
     }
   },
   "type": "object",
@@ -541,6 +597,9 @@
           "scope": {
             "type": "string"
           },
+          "gateRelevant": {
+            "type": "boolean"
+          },
           "connector": { "type": "string" },
           "projectKey": { "type": "string" },
           "branch": { "type": "string" },
@@ -677,6 +736,13 @@
           }
         }
       }
+    },
+    "functionMeasurements": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/functionMeasurement" }
+    },
+    "maintainabilityCoverage": {
+      "$ref": "#/$defs/maintainabilityCoverage"
     },
     "clones": {
       "type": "object",

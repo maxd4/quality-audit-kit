@@ -55,6 +55,7 @@ A quality scan answers what an analyzer found. A maintenance workflow also needs
 | npm CLI | After MVP verification | Private local tarball with install/uninstall smoke test; not published |
 | Optional GitHub Actions check | Distribution preparation | Manual-only workflow with `contents: read`; no dashboard or required remote service |
 | Local SARIF 2.1.0 import/export and optional SonarQube connector | Implemented | Opt-in; no account required by other commands |
+| Function-level JS/TS maintainability measurements | Implemented | Opt-in informative adapter with explicit coverage; see [docs/maintainability.md](docs/maintainability.md) |
 | Dependency graph and architectural radar | Later | Not implemented |
 
 ## Intended workflow
@@ -69,7 +70,7 @@ flowchart LR
     F --> G[Report and offline bundle]
 ```
 
-This repository installs no analyzer. A target repository's locally installed Knip or jscpd binary is executed only when the user passes `--run`.
+This repository installs no analyzer. A target repository's locally installed Knip or jscpd binary is executed only when the user passes `--run`. Function-level JavaScript and TypeScript maintainability is available separately through the explicit `--run=maintainability` capability; see [docs/maintainability.md](docs/maintainability.md).
 
 ## Use the local CLI
 

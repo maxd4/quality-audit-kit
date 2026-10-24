@@ -10,7 +10,7 @@
 | Node / npm | Node `v24.14.0` / npm `11.9.0` |
 | Package distribution | private local tarball, offline consumer install |
 | Repositories | this checkout at `067c3fa6`; `ecoandgo` outside CleanMyMap at `5386b17a` |
-| Target mutation | none; both Git statuses were byte-for-byte preserved by the read-only harness |
+| Target mutation | the harness compares Git status and SHA-256 snapshots of tracked and non-ignored untracked files; ignored files and external effects remain outside the proof |
 | Finding input | the repository SARIF fixture, used identically for both targets |
 
 `ecoandgo` is an independent repository outside CleanMyMap. Its pre-existing dirty worktree was not altered. The common SARIF fixture proves path handling and contract stability across two repository roots; it does **not** prove analyzer diversity, project-specific classification accuracy or a real Knip/jscpd execution on either target.
@@ -60,4 +60,4 @@ The package smoke test passed in an isolated consumer with network access disabl
 
 ## Method and release boundary
 
-Each run records repository revision, runtime, platform, command durations, output size, finding counts and worktree preservation. Measurements are separated from opinions and stored outside the repository by default. A future release still requires independent analyzer runs, a known-ground-truth classification corpus, Linux/macOS evidence, a release/signing decision and a manually observed GitHub workflow before those claims can change from `NOT_PROVEN` or `NOT_RUN`.
+Each run records repository revision, runtime, platform, command durations, output size, finding counts and separate `gitStatusPreserved`, `contentPreserved` and `contentSnapshot` fields. `contentSnapshot` contains file sizes and SHA-256 values for tracked and non-ignored untracked regular files observed through `git ls-files`; ignored files, external effects and temporary effects outside that observed set are `NOT_OBSERVABLE`. An unchanged Git status alone is never treated as content preservation. Essential commands and artifacts must be successful and attributable to the same `runId`; expected status 2 remains visible only for `fix-preview` and `verify`. A future release still requires independent analyzer runs, a known-ground-truth classification corpus, Linux/macOS evidence, a release/signing decision and a manually observed GitHub workflow before those claims can change from `NOT_PROVEN` or `NOT_RUN`.

@@ -29,6 +29,12 @@ const { buildSarif, importSarifFile } = require('./sarif');
 const { connectSonar, importSonar, importSonarExport } = require('./sonar');
 const { buildCloneAudit, renderCloneMarkdown } = require('./clone-triage');
 const {
+  ENGINE_NAME: MAINTAINABILITY_ENGINE,
+  ENGINE_VERSION: MAINTAINABILITY_ENGINE_VERSION,
+  analyzeRepository: analyzeMaintainability,
+  importReport: importMaintainabilityReport,
+} = require('./maintainability');
+const {
   TEMPLATE_FILES,
   buildAgentPrompt,
   diffPreview,
@@ -159,7 +165,7 @@ function scannerSelection(value) {
   if (value === undefined) return new Set();
   if (value === true) return new Set(SCANNERS);
   const selected = String(value).split(',').map((name) => name.trim()).filter(Boolean);
-  const unknown = selected.filter((name) => !SCANNERS.includes(name));
+  const unknown = selected.filter((name) => !SCANNERS.includes(name) && name !== MAINTAINABILITY_ENGINE);
   if (unknown.length) throw new Error(`Unknown scanner(s): ${unknown.join(', ')}`);
   return new Set(selected);
 }
@@ -426,6 +432,8 @@ async function scanCommand(positional, options) {
   const findings = [];
   const engines = [];
   const diagnostics = [];
+  let maintainabilityMeasurements;
+  let maintainabilityCoverage;
 
   for (const scanner of SCANNERS) {
     const scannerConfig = config.scanners?.[scanner] || {};
@@ -452,6 +460,43 @@ async function scanCommand(positional, options) {
     };
     engines.push(engine);
     findings.push(...(result.findings || []));
+    diagnostics.push(...(result.diagnostics || []));
+  }
+
+  const maintainabilityReport = options['maintainability-report'];
+  const runMaintainability = executeScanners.has(MAINTAINABILITY_ENGINE) || maintainabilityReport !== undefined;
+  if (runMaintainability) {
+    let result;
+    try {
+      result = maintainabilityReport !== undefined
+        ? importMaintainabilityReport(target, maintainabilityReport === true ? 'maintainability-report.json' : String(maintainabilityReport), sourceRevisionForExecution(discovery))
+        : analyzeMaintainability(target, {
+          sourceRevision: sourceRevisionForExecution(discovery),
+          ...(config.quality?.maintainability && typeof config.quality.maintainability === 'object' ? config.quality.maintainability : {}),
+        });
+    } catch (error) {
+      result = {
+        status: 'FAILURE',
+        measurements: [],
+        coverage: { schemaVersion: '0.1-draft', status: 'FAILURE', eligibleFiles: [], measuredFiles: [], excludedFiles: [], unsupportedFiles: [], errorFiles: [], functionsMeasured: 0, engines: [] },
+        diagnostics: [{ kind: 'MAINTAINABILITY_DIAGNOSTIC', code: 'IMPORT_FAILED', message: error.message }],
+        sourceRevision: sourceRevisionForExecution(discovery),
+      };
+    }
+    const sourceRevision = result.sourceRevision || sourceRevisionForExecution(discovery);
+    engines.push({
+      name: MAINTAINABILITY_ENGINE,
+      version: MAINTAINABILITY_ENGINE_VERSION,
+      measurementStatus: result.status,
+      gateOutcome: result.status === 'MEASURED' || result.status === 'PARTIAL' ? 'INFORMATIVE' : 'NOT_EVALUATED',
+      sourceRevision,
+      scope: 'function',
+      gateRelevant: false,
+      metadata: { coverage: result.coverage, parser: result.coverage?.engines || [] },
+      ...(result.diagnostics?.length ? { diagnostic: `${result.diagnostics.length} maintainability diagnostic(s) recorded.` } : {}),
+    });
+    maintainabilityMeasurements = result.measurements || [];
+    maintainabilityCoverage = result.coverage;
     diagnostics.push(...(result.diagnostics || []));
   }
 
@@ -483,6 +528,7 @@ async function scanCommand(positional, options) {
     discovery: discoveryForOutput(discovery),
     engines,
     findings,
+    ...(maintainabilityMeasurements ? { functionMeasurements: maintainabilityMeasurements, maintainabilityCoverage } : {}),
     ...(diagnostics.length ? { diagnostics } : {}),
   };
 
@@ -1511,7 +1557,7 @@ function thresholdsCommand(positional, options) {
 const COMMAND_HELP = {
   setup: 'quality-audit-kit setup [repository] [--state file] [--answers file] [--run[=knip,jscpd]]\nquality-audit-kit setup --resume state.json [--answers file]\n  Orchestrates discovery, protected initialization, optional explicit personalization, local scan and Markdown report.\n  Returns a resumable COMPLETE, PARTIAL or BLOCKED JSON state; it never installs analyzers or contacts a service.',
   init: 'quality-audit-kit init [repository] [--force] [--preview]\n  Creates a minimal config and protected generic project templates. Existing files stay unchanged by default.',
-  scan: 'quality-audit-kit scan [repository] [--run[=knip,jscpd]] [--output run.json]\n  Imports existing reports by default; --run only executes analyzers already installed in the target repository.',
+  scan: 'quality-audit-kit scan [repository] [--run[=knip,jscpd,maintainability]] [--output run.json]\n  Imports existing reports by default; --run only executes analyzers already installed in the target repository. --run=maintainability is an opt-in informative function analysis.',
   report: 'quality-audit-kit report run.json [--format terminal|markdown|json|sarif|zip] [--output file]\n  Renders evidence without computing a global quality score or overwriting an existing output.',
   plan: 'quality-audit-kit plan run.json [--output plan.json]\nquality-audit-kit plan --next [plan.json]\nquality-audit-kit plan --export plan.json --output prompts\n  Produces deterministic, reviewable correction lots and prompts.',
   thresholds: 'quality-audit-kit thresholds recommend run.json [--export proposal.json]\nquality-audit-kit thresholds recommend run.json --apply --approve\n  Recommendations are advisory; normative changes require both flags.',
