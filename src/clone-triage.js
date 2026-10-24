@@ -254,7 +254,7 @@ function buildCloneAudit(run, options = {}) {
   const families = [...groups.values()].map((group) => buildFamily(group, decisions, annotations)).sort((left, right) => left.id.localeCompare(right.id));
   const prompts = families.filter((family) => family.promptEligible).map((family) => ({
     familyId: family.id,
-    fileName: `${family.id.replace(/[^a-z0-9:-]+/gi, '-')}.md`,
+    fileName: `${family.id.replace(/[^a-z0-9-]+/gi, '-')}.md`,
     prompt: `Review clone family ${family.id}. Evidence: ${family.qualification.evidence} Files: ${family.files.join(', ')}. Proposed action: ${family.recommendation}. Do not modify code until a human confirms ownership, behavior and tests.`,
   }));
   return {

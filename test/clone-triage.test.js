@@ -152,3 +152,37 @@ test('clones CLI emits JSON and does not rerun a scanner', () => {
   assert.equal(audit.counts.families, 1);
   assert.deepEqual(fs.readdirSync(root), ['run.json']);
 });
+
+test('explicit clone annotation enables a protected review prompt export', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-clone-prompts-'));
+  const run = runWithFindings([fixtureFinding('f1', 'src/a.js', 1, 3, 'src/b.js', 10, 12)]);
+  const familyId = buildCloneAudit(run).families[0].id;
+  run.cloneAnnotations = {
+    [familyId]: {
+      category: 'DUPLICATED_IMPLEMENTATION',
+      source: 'HUMAN_REVIEW',
+      evidence: 'A reviewer confirmed the implementation has a shared owner.',
+    },
+  };
+  const runPath = path.join(root, 'run.json');
+  const promptDirectory = path.join(root, 'prompts');
+  fs.writeFileSync(runPath, `${JSON.stringify(run)}\n`);
+
+  const result = spawnSync(process.execPath, [
+    path.join(__dirname, '..', 'bin', 'quality-audit-kit.js'),
+    'clones',
+    runPath,
+    '--format',
+    'json',
+    '--export',
+    promptDirectory,
+  ], { encoding: 'utf8' });
+
+  assert.equal(result.status, 0, result.stderr);
+  const audit = JSON.parse(result.stdout);
+  assert.equal(audit.prompts.length, 1);
+  assert.equal(audit.families[0].recommendation, 'EXTRACT_SHARED_INFRASTRUCTURE');
+  const promptPath = path.join(promptDirectory, audit.prompts[0].fileName);
+  assert.match(fs.readFileSync(promptPath, 'utf8'), new RegExp(familyId));
+  assert.deepEqual(fs.readdirSync(root).sort(), ['prompts', 'run.json']);
+});
