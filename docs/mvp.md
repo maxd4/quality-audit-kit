@@ -14,7 +14,7 @@ A local-first tool for JS/TS repositories that imports existing scanner outputs 
 4. Associate reviewed justifications and flag orphaned/stale decisions.
 5. Preserve SHA, input scope, run ID, tool versions and measurement states.
 6. Generate a deterministic machine JSON report and a concise Markdown report.
-7. Produce an offline archive with manifest and checksums; verify that the archive corresponds to one run and report.
+7. Produce an offline archive with manifest, inventory and checksums; verify that the archive corresponds to one run and report.
 8. Run safely without modifying repository code, hooks, baselines, or working files, except explicit output locations.
 
 ### Non-goals for initial delivery
@@ -33,7 +33,7 @@ quality-audit-kit scan
 quality-audit-kit report
 ```
 
-`init` writes an explicit local configuration and deterministic `PROJECT_HANDOFF.md` / `COMMIT_REVIEW.md` templates. It can prepare an explicit Codex customization request and refresh only managed generated blocks. `scan` is read-only toward source and policy, imports existing Knip/jscpd JSON reports and can execute locally installed binaries only when `--run` is explicit. `baseline` creates an explicit measured-run baseline, `triage` appends evidence-backed decisions and reports stale decisions, and `scan --baseline` applies a configured ratchet without mutating the baseline automatically. `report` formats existing recorded evidence. These capabilities remain experimental and local-first.
+`init` writes an explicit local configuration and deterministic `PROJECT_HANDOFF.md` / `COMMIT_REVIEW.md` templates. It can prepare an explicit Codex customization request and refresh only managed generated blocks. `scan` is read-only toward source and policy, imports existing Knip/jscpd JSON reports and can execute locally installed binaries only when `--run` is explicit. `baseline` creates an explicit measured-run baseline, `triage` appends evidence-backed decisions and reports stale decisions, and `scan --baseline` applies a configured ratchet without mutating the baseline automatically. `report` formats existing recorded evidence and can create/verify deterministic offline bundles. These capabilities remain experimental and local-first.
 
 ## Acceptance criteria
 

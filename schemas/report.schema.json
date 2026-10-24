@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/quality-audit-kit/report.schema.json",
+  "title": "Quality Audit Kit structured report",
+  "description": "Deterministic derived report for one audit run. No global quality score is part of this contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "reportVersion",
+    "reportType",
+    "runId",
+    "source",
+    "measurements",
+    "findings",
+    "measurementFailures",
+    "recommendations"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "0.1-draft" },
+    "reportVersion": { "const": "0.1-draft" },
+    "reportType": { "const": "QUALITY_AUDIT_RUN_REPORT" },
+    "runId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{8,80}$" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "contextSha", "inputScope", "reproducible", "generatedAt"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "contextSha": { "type": ["string", "null"], "pattern": "^[a-fA-F0-9]{40}$" },
+        "inputScope": { "enum": ["COMMITTED_SNAPSHOT", "STAGED", "WORKTREE_LIVE"] },
+        "reproducible": { "type": "boolean" },
+        "generatedAt": { "type": ["string", "null"] }
+      }
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["runId", "sha", "contextSha", "scope", "engine", "version", "measurementStatus", "validationState", "sourceRevision", "gateOutcome"],
+        "properties": {
+          "runId": { "type": "string" },
+          "sha": { "type": ["string", "null"], "pattern": "^[a-fA-F0-9]{40}$" },
+          "contextSha": { "type": ["string", "null"], "pattern": "^[a-fA-F0-9]{40}$" },
+          "scope": { "type": "string" },
+          "engine": { "type": "string", "minLength": 1 },
+          "version": { "type": "string", "minLength": 1 },
+          "measurementStatus": { "enum": ["MEASURED", "NOT_MEASURED", "FAILURE", "SKIPPED_BY_POLICY"] },
+          "validationState": { "enum": ["VALIDATED", "MEASURED_UNVERIFIED", "FAILED", "NOT_MEASURED", "SKIPPED"] },
+          "sourceRevision": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status", "sha", "basis"],
+            "properties": {
+              "status": { "enum": ["VERIFIED", "UNVERIFIED", "UNKNOWN"] },
+              "sha": { "type": ["string", "null"], "pattern": "^[a-fA-F0-9]{40}$" },
+              "basis": { "type": "string", "minLength": 1 }
+            }
+          },
+          "gateOutcome": { "enum": ["PASS", "FAIL", "INFORMATIVE", "NOT_EVALUATED"] },
+          "diagnostic": { "type": "string" }
+        }
+      }
+    },
+    "findings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["new", "historicalActionable", "historicalJustified", "resolved", "reintroduced", "unclassified"],
+      "properties": {
+        "new": { "type": "array", "items": { "type": "object" } },
+        "historicalActionable": { "type": "array", "items": { "type": "object" } },
+        "historicalJustified": { "type": "array", "items": { "type": "object" } },
+        "resolved": { "type": "array", "items": { "type": "object" } },
+        "reintroduced": { "type": "array", "items": { "type": "object" } },
+        "unclassified": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "measurementFailures": { "type": "array", "items": { "type": "object" } },
+    "recommendations": { "type": "array", "items": { "type": "string" } },
+    "comparison": { "type": "object" },
+    "qualityGate": { "type": "object" }
+  }
+}

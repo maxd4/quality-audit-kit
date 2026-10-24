@@ -342,6 +342,93 @@ test('scan preserves missing and failed measurement states', () => {
   }
 });
 
+test('report produces deterministic views, an offline bundle and refuses overwrites', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const run = measuredRun({ runId: 'report-run-0001', seed: 'a', findings: [{ id: 'finding-report-0001', path: 'src/unused.js', message: 'unused export' }] });
+    fs.writeFileSync(path.join(repository, 'run.json'), `${JSON.stringify(run, null, 2)}\n`);
+    fs.writeFileSync(path.join(repository, 'evidence.md'), '# Authorized evidence\n\nNo source or secret.\n');
+
+    const terminal = runCli(repository, ['report', 'run.json']);
+    assert.equal(terminal.status, 0, terminal.stderr);
+    assert.match(terminal.stdout, /No global quality score/);
+    assert.match(terminal.stdout, /Unclassified: 1/);
+
+    const jsonOne = runCli(repository, ['report', 'run.json', '--format', 'json', '--output', 'report-one.json']);
+    const jsonTwo = runCli(repository, ['report', 'run.json', '--format', 'json', '--output', 'report-two.json']);
+    assert.equal(jsonOne.status, 0, jsonOne.stderr);
+    assert.equal(jsonTwo.status, 0, jsonTwo.stderr);
+    const structured = JSON.parse(fs.readFileSync(path.join(repository, 'report-one.json'), 'utf8'));
+    assert.equal(structured.runId, run.runId);
+    assert.equal(structured.measurements[0].runId, run.runId);
+    assert.equal(structured.measurements[0].sha, run.engines[0].sourceRevision.sha);
+    assert.equal(structured.measurements[0].validationState, 'VALIDATED');
+    assert.equal(Object.hasOwn(structured, 'score'), false);
+    assert.deepEqual(fs.readFileSync(path.join(repository, 'report-one.json')), fs.readFileSync(path.join(repository, 'report-two.json')));
+
+    const markdown = runCli(repository, ['report', 'run.json', '--format', 'markdown', '--output', 'report.md']);
+    assert.equal(markdown.status, 0, markdown.stderr);
+    assert.match(fs.readFileSync(path.join(repository, 'report.md'), 'utf8'), /## Measurement failures/);
+
+    const bundleOne = runCli(repository, ['report', 'run.json', '--format', 'zip', '--output', 'bundle-one.zip', '--include-evidence', 'evidence.md']);
+    const bundleTwo = runCli(repository, ['report', 'run.json', '--format', 'zip', '--output', 'bundle-two.zip', '--include-evidence', 'evidence.md']);
+    assert.equal(bundleOne.status, 0, bundleOne.stderr);
+    assert.equal(bundleTwo.status, 0, bundleTwo.stderr);
+    assert.deepEqual(fs.readFileSync(path.join(repository, 'bundle-one.zip')), fs.readFileSync(path.join(repository, 'bundle-two.zip')));
+    const verified = runCli(repository, ['report', '--verify-bundle', 'bundle-one.zip']);
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.match(verified.stdout, /"verified": true/);
+    assert.match(verified.stdout, /"runId": "report-run-0001"/);
+
+    const overwrite = runCli(repository, ['report', 'run.json', '--format', 'json', '--output', 'report-one.json']);
+    assert.notEqual(overwrite.status, 0);
+    assert.match(overwrite.stderr, /Refusing to overwrite existing artifact/);
+
+    fs.writeFileSync(path.join(repository, 'locked.json.qak-lock'), 'another run is writing');
+    const locked = runCli(repository, ['report', 'run.json', '--format', 'json', '--output', 'locked.json']);
+    assert.notEqual(locked.status, 0);
+    assert.match(locked.stderr, /Refusing concurrent write/);
+    fs.rmSync(path.join(repository, 'locked.json.qak-lock'), { force: true });
+
+    const corrupt = Buffer.from(fs.readFileSync(path.join(repository, 'bundle-one.zip')));
+    corrupt[corrupt.length - 25] ^= 0xff;
+    fs.writeFileSync(path.join(repository, 'bundle-corrupt.zip'), corrupt);
+    const invalidBundle = runCli(repository, ['report', '--verify-bundle', 'bundle-corrupt.zip']);
+    assert.notEqual(invalidBundle.status, 0);
+    assert.match(invalidBundle.stderr, /ZIP|checksum|Bundle/);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('report rejects SHA/run identity contradictions and unsafe evidence', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const inconsistent = measuredRun({ runId: 'report-run-0002', seed: 'b' });
+    inconsistent.repository.commitSha = 'c'.repeat(40);
+    inconsistent.repository.contextCommitSha = 'd'.repeat(40);
+    fs.writeFileSync(path.join(repository, 'inconsistent.json'), `${JSON.stringify(inconsistent, null, 2)}\n`);
+    const invalidRun = runCli(repository, ['report', 'inconsistent.json', '--format', 'json', '--output', 'should-not-exist.json']);
+    assert.notEqual(invalidRun.status, 0);
+    assert.match(invalidRun.stderr, /inconsistent.*commitSha/i);
+    assert.equal(fs.existsSync(path.join(repository, 'should-not-exist.json')), false);
+
+    const valid = measuredRun({ runId: 'report-run-0003', seed: 'e' });
+    fs.writeFileSync(path.join(repository, 'valid.json'), `${JSON.stringify(valid, null, 2)}\n`);
+    fs.writeFileSync(path.join(repository, 'secret.txt'), 'token=ghp_1234567890abcdef\n');
+    fs.writeFileSync(path.join(repository, 'source.js'), 'const source = true;\n');
+    const secretBundle = runCli(repository, ['report', 'valid.json', '--format', 'zip', '--output', 'secret.zip', '--include-evidence', 'secret.txt']);
+    assert.notEqual(secretBundle.status, 0);
+    assert.match(secretBundle.stderr, /approved|sensitive/i);
+    assert.equal(fs.existsSync(path.join(repository, 'secret.zip')), false);
+    const sourceBundle = runCli(repository, ['report', 'valid.json', '--format', 'zip', '--output', 'source.zip', '--include-evidence', 'source.js']);
+    assert.notEqual(sourceBundle.status, 0);
+    assert.equal(fs.existsSync(path.join(repository, 'source.zip')), false);
+  } finally {
+    cleanup(repository);
+  }
+});
+
 test('scan executes only locally installed scanners when explicitly requested', () => {
   const repository = makeRepository('execution-fixture');
   try {

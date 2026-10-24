@@ -29,7 +29,7 @@ A quality scan answers what an analyzer found. A maintenance workflow also needs
 | Evidence-aware quality runs | MVP | Implemented draft run output with explicit measurement states |
 | Human decisions and stale justification detection | MVP | Draft JSON Schema |
 | JSON and Markdown reports | MVP | Implemented locally |
-| Offline evidence bundles | MVP | Specified, not implemented |
+| Offline evidence bundles | MVP | Implemented locally, experimental |
 | npm CLI | After MVP verification | Local package prototype; not published |
 | GitHub Actions and SARIF export | Later | Not implemented |
 | Dependency graph and architectural radar | Later | Not implemented |
@@ -61,9 +61,15 @@ node bin/quality-audit-kit.js scan /path/to/repository --run=knip,jscpd --output
 node bin/quality-audit-kit.js baseline run.json --output quality-audit-kit.baseline.json
 node bin/quality-audit-kit.js triage run.json --baseline quality-audit-kit.baseline.json
 node bin/quality-audit-kit.js report run.json
+node bin/quality-audit-kit.js report run.json --format markdown --output report.md
+node bin/quality-audit-kit.js report run.json --format json --output report.json
+node bin/quality-audit-kit.js report run.json --format zip --output quality-audit-kit-run.zip
+node bin/quality-audit-kit.js report --verify-bundle quality-audit-kit-run.zip
 ```
 
 `init` writes an explicit `quality-audit-kit.config.json` and creates generic, protected `PROJECT_HANDOFF.md` and `COMMIT_REVIEW.md` templates in the target repository. It detects actual files, configurations, documentation, tests and rules; unproven fields remain `UNKNOWN`. Re-running `init` is safe: existing documents are protected, while `--update-templates --preview` shows a deterministic diff and `--update-templates` refreshes only managed generated blocks. `context refresh` updates only stale detected facts and controls, preserves human decisions and reports contradictions instead of rewriting instructions. `--agent codex` prepares an optional, explicit Codex customization handoff; the CLI never executes an agent or installs dependencies implicitly. `scan` writes JSON to stdout unless `--output` is provided, and does not modify analyzed source files. Existing `knip-report.json` and `jscpd-report.json` files are imported automatically; `--run` executes only locally installed scanner binaries and never installs dependencies. An absent, skipped or failed scanner remains visible as `NOT_MEASURED` or `FAILURE`; it is never treated as a clean result. `baseline` requires a complete measured run, `triage` preserves evidence-backed decisions, and `scan --baseline` refuses incomplete comparisons and applies the configured ratchet without changing the baseline implicitly. See [CLI usage and contracts](docs/cli.md).
+
+`report` emits a readable terminal summary by default, deterministic Markdown or structured JSON on request, and an optional offline ZIP with `manifest.json`, `inventory.json`, `checksums.sha256` and an offline verification command. It never computes a global quality score, refuses output overwrites, and bundles only normalized evidence plus explicitly authorized non-source evidence files.
 
 ## Read the project
 

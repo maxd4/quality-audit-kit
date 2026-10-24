@@ -68,7 +68,9 @@ New or reintroduced blocking findings fail the gate when they exceed `maxNewBloc
 
 By default `scan` writes the run JSON to stdout. This avoids changing the analyzed worktree. Use an explicit `--output` path to save a run artifact.
 
-`report` renders a saved run as Markdown by default or reproduces normalized JSON with `--format json`. Reports retain negative measurement states and explicitly warn when no measured findings are available.
+`report` renders a saved run as a readable terminal summary by default. `--format markdown` writes a deterministic Markdown report and `--format json` writes the structured report contract in [`schemas/report.schema.json`](../schemas/report.schema.json). Every measurement repeats its `runId`, source SHA (when proven), context SHA, scope, engine, version, measurement status and validation state. Findings are separated into new, historical actionable, historical justified, resolved, reintroduced and unclassified groups; measurement failures and recommendations are separate. No global quality score is emitted.
+
+`report --format zip --output quality-audit-kit-run.zip` creates a deterministic offline bundle. It contains the sanitized run, structured JSON, Markdown, terminal summary, `manifest.json`, `inventory.json`, `checksums.sha256` and `VERIFY.txt`. `report --verify-bundle quality-audit-kit-run.zip` validates the ZIP, checksums, manifest, inventory, runId and context SHA without network access. `--include-evidence file[,file...]` is optional and only accepts explicitly authorized, non-source text/report files inside the run directory; source files, secret-like names, binary files and detected tokens are refused. Output files are written atomically and existing artifacts are never overwritten.
 
 ## Contract boundaries
 

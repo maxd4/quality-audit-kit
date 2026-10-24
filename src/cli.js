@@ -14,7 +14,14 @@ const {
   policyRelaxations,
 } = require('./history');
 const { loadOrRunScanner } = require('./scanners');
-const { renderMarkdown, writeOutput } = require('./report');
+const {
+  buildStructuredReport,
+  createBundle,
+  renderMarkdown,
+  renderTerminal,
+  verifyBundle,
+  writeOutput,
+} = require('./report');
 const {
   TEMPLATE_FILES,
   buildAgentPrompt,
@@ -632,12 +639,29 @@ function triageCommand(positional, options) {
 }
 
 function reportCommand(positional, options) {
+  if (options['verify-bundle'] !== undefined) {
+    const bundlePath = options['verify-bundle'] === true ? positional[0] : options['verify-bundle'];
+    if (!bundlePath) throw new Error('report --verify-bundle requires a ZIP path.');
+    const verification = verifyBundle(path.resolve(process.cwd(), bundlePath));
+    process.stdout.write(`${JSON.stringify(verification, null, 2)}\n`);
+    return verification;
+  }
   const inputPath = positional[0];
   if (!inputPath) throw new Error('report requires a run JSON path.');
-  const run = readJson(path.resolve(process.cwd(), inputPath));
-  const format = options.format || 'markdown';
-  if (!['json', 'markdown'].includes(format)) throw new Error(`Unsupported report format: ${format}`);
-  const content = format === 'json' ? `${JSON.stringify(run, null, 2)}\n` : renderMarkdown(run);
+  const resolvedInput = path.resolve(process.cwd(), inputPath);
+  const run = readJson(resolvedInput);
+  const format = options.format || 'terminal';
+  if (!['terminal', 'markdown', 'json', 'zip'].includes(format)) throw new Error(`Unsupported report format: ${format}`);
+  const bundlePath = options.bundle ? path.resolve(process.cwd(), options.bundle) : (format === 'zip' && options.output ? path.resolve(process.cwd(), options.output) : null);
+  if (format === 'zip' && !bundlePath) throw new Error('report --format zip requires --bundle file.zip or --output file.zip.');
+  if (bundlePath) createBundle(run, resolvedInput, bundlePath, options);
+  if (format === 'zip') {
+    process.stdout.write(`Offline bundle written: ${bundlePath}\n`);
+    return;
+  }
+  const content = format === 'json'
+    ? `${JSON.stringify(buildStructuredReport(run), null, 2)}\n`
+    : format === 'markdown' ? renderMarkdown(run) : renderTerminal(run);
   const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
   if (outputPath) writeOutput(outputPath, content);
   else process.stdout.write(content);
@@ -647,9 +671,13 @@ function printHelp() {
   process.stdout.write(`Quality Audit Kit ${require('../package.json').version} (experimental)\n\nUsage:\n  quality-audit-kit init [repository] [--force] [--templates deterministic|none] [--update-templates] [--preview]\n  quality-audit-kit init [repository] --agent codex [--agent-prompt file] [--agent-input file]\n  quality-audit-kit context refresh [repository] [--preview]\n  quality-audit-kit init [repository] --link-agents\n  quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--run[=knip,jscpd]] [--baseline file] [--decisions file]\n  quality-audit-kit baseline run.json [--output file] [--replace] [--preview]\n  quality-audit-kit triage run.json [--baseline file] [--decisions file] [--finding id --decision FIX|DEFER|KEEP_JUSTIFIED|FALSE_POSITIVE --reason text --reviewer name --reviewed-revision sha --evidence TYPE|REFERENCE|OUTCOME]\n  quality-audit-kit report run.json [--format markdown|json] [--output file]\n\ninit creates protected generic PROJECT_HANDOFF.md and COMMIT_REVIEW.md templates. Existing documents are never overwritten by default; --update-templates refreshes only managed generated blocks and preserves manual sections. --preview emits deterministic diff previews without mutation.\ncontext refresh updates only detected facts and controls, reports changed values and contradictions, and preserves all instructions and manual decisions.\n--agent codex prepares a Codex customization request; it does not execute an agent or contact a service unless explicit input is supplied with --agent-input.\nscan imports existing JSON reports by default. --run explicitly executes installed local scanners; it never installs dependencies. With --baseline it compares only complete, compatible measurements and applies the configured ratchet.\nbaseline creates an explicit, versioned baseline; replacing one requires --replace and never increases a configured ceiling automatically. triage appends an evidence-backed decision or reports stale decisions.\nNo scanner, failed scanner, incomplete audit, or unmeasured scanner is treated as a clean result.\n`);
 }
 
+function printHelpDetailed() {
+  process.stdout.write(`Quality Audit Kit ${require('../package.json').version} (experimental)\n\nUsage:\n  quality-audit-kit init [repository] [--force] [--templates deterministic|none] [--update-templates] [--preview]\n  quality-audit-kit init [repository] --agent codex [--agent-prompt file] [--agent-input file]\n  quality-audit-kit context refresh [repository] [--preview]\n  quality-audit-kit init [repository] --link-agents\n  quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--run[=knip,jscpd]] [--baseline file] [--decisions file]\n  quality-audit-kit baseline run.json [--output file] [--replace] [--preview]\n  quality-audit-kit triage run.json [--baseline file] [--decisions file] [--finding id --decision FIX|DEFER|KEEP_JUSTIFIED|FALSE_POSITIVE --reason text --reviewer name --reviewed-revision sha --evidence TYPE|REFERENCE|OUTCOME]\n  quality-audit-kit report run.json [--format terminal|markdown|json] [--output file] [--bundle file.zip] [--include-evidence file[,file...]]\n  quality-audit-kit report --verify-bundle file.zip\n\nreport defaults to a readable terminal summary. Markdown and structured JSON are deterministic derived views. --bundle creates an offline ZIP with manifest, inventory, checksums and verification instructions. Existing output artifacts are never overwritten; source files, secrets and absolute paths are not bundled.\nNo scanner, failed scanner, incomplete audit, or unmeasured scanner is treated as a clean result.\n`);
+}
+
 async function main(argv) {
   const { command, options, positional } = parseArguments(argv);
-  if (options.help || command === 'help' || command === '--help') return printHelp();
+  if (options.help || command === 'help' || command === '--help') return printHelpDetailed();
   if (options.version || command === '--version') return process.stdout.write(`${require('../package.json').version}\n`);
   if (command === 'init') return initCommand(positional, options);
   if (command === 'context') {
