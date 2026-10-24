@@ -93,7 +93,7 @@ test('canonical function measurements validate, report offline and import withou
       inputScope: 'COMMITTED_SNAPSHOT',
       reproducible: true,
       generatedAt: '2026-10-24T12:00:00.000Z',
-      engines: [{ name: 'maintainability', version: '1.0.0', measurementStatus: result.status, gateOutcome: 'INFORMATIVE', gateRelevant: false, sourceRevision: verifiedRevision(), scope: 'function' }],
+      engines: [{ name: 'maintainability', version: '1.1.0', measurementStatus: result.status, gateOutcome: 'INFORMATIVE', gateRelevant: false, sourceRevision: verifiedRevision(), scope: 'function' }],
       findings: [],
       functionMeasurements: result.measurements,
       maintainabilityCoverage: result.coverage,
