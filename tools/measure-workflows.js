@@ -103,16 +103,46 @@ function hashBytes(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+function snapshotParentBoundary(root, candidate, relativePath) {
+  let current = path.dirname(candidate);
+  while (current !== root && isInside(root, current)) {
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (error) {
+      return { code: 'FILE_PARENT_SNAPSHOT_FAILED', path: relativePath, message: error.message };
+    }
+    if (stat.isSymbolicLink()) {
+      let real;
+      try {
+        real = fs.realpathSync(current);
+      } catch (error) {
+        return { code: 'SYMLINK_PARENT_RESOLUTION_FAILED', path: relativePath, message: error.message };
+      }
+      if (!isInside(root, real)) {
+        return { code: 'SYMLINK_PARENT_OUTSIDE_REPOSITORY', path: relativePath, message: 'A symbolic-link parent resolves outside the repository; its child was not read.' };
+      }
+      return { code: 'SYMLINK_PARENT_NOT_ALLOWED', path: relativePath, message: 'A symbolic-link parent is not followed during content snapshots, even when its destination is inside the repository.' };
+    }
+    current = path.dirname(current);
+  }
+  return null;
+}
+
 function snapshotFiles(target) {
-  const lexicalRoot = path.resolve(target);
   const root = fs.realpathSync(target);
   const listed = observedFilePaths(target);
   const files = {};
   const diagnostics = [...listed.diagnostics];
   for (const relativePath of listed.paths) {
-    const candidate = path.resolve(target, relativePath);
-    if (!isInside(lexicalRoot, candidate)) {
+    const candidate = path.resolve(root, relativePath);
+    if (!isInside(root, candidate)) {
       diagnostics.push({ code: 'FILE_PATH_OUTSIDE_REPOSITORY', path: relativePath, message: 'The observed file path escaped the lexical repository root.' });
+      continue;
+    }
+    const parentDiagnostic = snapshotParentBoundary(root, candidate, relativePath);
+    if (parentDiagnostic) {
+      diagnostics.push(parentDiagnostic);
       continue;
     }
     let stat;
@@ -151,7 +181,7 @@ function snapshotFiles(target) {
     diagnostics,
     observedFileCount: Object.keys(files).length,
     ignoredFilesNotObserved: true,
-    symlinkPolicy: 'In-repository links are represented as links; links resolving outside the repository are excluded and reported.',
+    symlinkPolicy: 'Final in-repository links are represented as links. Final links resolving outside the repository and all symbolic-link parents are excluded and reported; parent links are never followed during content reads.',
   };
 }
 

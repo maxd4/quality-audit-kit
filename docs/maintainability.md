@@ -77,8 +77,14 @@ and a scope with no usable measurements is `FAILURE`. Voluntary exclusions
 remain `SKIPPED_BY_POLICY` and do not become discovery errors.
 
 The optional `--maintainability-report path.json` imports an already generated
-canonical report without running the analyzer. The imported file must contain
-`functionMeasurements` and `maintainabilityCoverage`.
+canonical report without running the analyzer. The importer validates the
+coverage inventory, statuses, counters, function measurement contract and
+provenance before accepting it. A `MEASURED` coverage must describe a complete
+eligible inventory; a valid complete inventory may nevertheless contain zero
+functions. Missing report-level provenance remains `UNKNOWN` and never falls
+back to the Git revision of the checkout. The report file and every parent
+directory must be physical, regular and inside the repository; symlink or
+junction traversal is refused before the file is read.
 
 ## Offline historical comparison
 

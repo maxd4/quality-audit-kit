@@ -25,6 +25,11 @@ const SKIP_DIRECTORIES = new Set([
   'generated', '__generated__', '.qak',
 ]);
 const POLICY_EXCLUDED_NAMES = [/\.min\.[cm]?[jt]sx?$/i, /\.bundle\.[cm]?[jt]sx?$/i, /\.generated\.[cm]?[jt]sx?$/i];
+const SOURCE_REVISION_STATUSES = new Set(['VERIFIED', 'UNVERIFIED', 'UNKNOWN']);
+const FUNCTION_MEASUREMENT_STATUSES = new Set(['MEASURED']);
+const MEASUREMENT_DIRECTIONS = new Set(['LOWER_IS_BETTER', 'HIGHER_IS_BETTER']);
+const PROVENANCE_KINDS = new Set(['REPORT', 'EXECUTION']);
+const COVERAGE_STATUSES = new Set(['MEASURED', 'PARTIAL', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY']);
 const CONTROL_METHOD_NAMES = new Set(['if', 'for', 'while', 'switch', 'catch', 'with', 'do', 'else', 'try']);
 const MULTI_CHARACTER_TOKENS = ['===', '!==', '>>>', '**=', '&&=', '||=', '??=', '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '/=', '%=', '**', '<<', '>>', '...', '::'];
 
@@ -55,6 +60,55 @@ function extensionInfo(filePath) {
 function isInside(root, candidate) {
   const relative = path.relative(root, candidate);
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function samePhysicalPath(left, right) {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function physicallyConfinedReportPath(root, reportPath) {
+  const lexicalRoot = path.resolve(root);
+  const resolved = path.isAbsolute(reportPath) ? path.resolve(reportPath) : path.resolve(lexicalRoot, reportPath);
+  if (!isInside(lexicalRoot, resolved)) throw new Error('Maintainability report must remain inside the analyzed repository.');
+
+  let realRoot;
+  try {
+    const rootStat = fs.lstatSync(lexicalRoot);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('Repository root is not a physical directory.');
+    realRoot = fs.realpathSync(lexicalRoot);
+  } catch (error) {
+    throw new Error(`Maintainability report repository boundary cannot be resolved: ${error.message}`);
+  }
+
+  let candidateStat;
+  try { candidateStat = fs.lstatSync(resolved); } catch (error) {
+    throw new Error(`Maintainability report path cannot be resolved: ${error.message}`);
+  }
+  if (candidateStat.isSymbolicLink()) throw new Error('Maintainability report cannot be a symbolic link.');
+  if (!candidateStat.isFile()) throw new Error('Maintainability report must be a regular file.');
+
+  let current = resolved;
+  while (true) {
+    let stat;
+    let physical;
+    try {
+      stat = fs.lstatSync(current);
+      physical = fs.realpathSync(current);
+    } catch (error) {
+      throw new Error(`Maintainability report path cannot be resolved physically: ${error.message}`);
+    }
+    if (stat.isSymbolicLink() || !samePhysicalPath(current, physical)) throw new Error('Maintainability report path cannot traverse a symbolic link or junction.');
+    if (!isInside(realRoot, physical)) throw new Error('Maintainability report resolves outside the analyzed repository.');
+    if (samePhysicalPath(current, lexicalRoot)) break;
+    const parent = path.dirname(current);
+    if (samePhysicalPath(parent, current)) throw new Error('Maintainability report path does not reach the repository boundary.');
+    current = parent;
+  }
+  return resolved;
 }
 
 function globToRegExp(pattern) {
@@ -660,14 +714,141 @@ function analyzeRepository(root, options = {}) {
   return { status: coverage.status, measurements, coverage, diagnostics };
 }
 
-function importReport(root, reportPath, fallbackSourceRevision) {
-  const resolved = path.isAbsolute(reportPath) ? reportPath : path.resolve(root, reportPath);
-  if (!isInside(root, resolved)) throw new Error('Maintainability report must remain inside the analyzed repository.');
-  const report = JSON.parse(fs.readFileSync(resolved, 'utf8'));
-  if (!Array.isArray(report.functionMeasurements) || !report.maintainabilityCoverage) throw new Error('Maintainability report must contain functionMeasurements and maintainabilityCoverage.');
-  const sourceRevision = sourceRevisionOrUnknown(report.sourceRevision || fallbackSourceRevision);
-  const measurements = report.functionMeasurements.map((measurement) => ({ ...measurement, provenance: { ...measurement.provenance, sourceRevision: measurement.provenance?.sourceRevision || sourceRevision } }));
-  return { status: report.maintainabilityCoverage.status || 'PARTIAL', measurements, coverage: report.maintainabilityCoverage, diagnostics: report.diagnostics || [], sourceRevision };
+function importError(message) {
+  throw new Error(`Invalid maintainability report: ${message}`);
+}
+
+function requireImportObject(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) importError(`${label} must be an object.`);
+}
+
+function requireImportString(value, label, minimum = 1) {
+  if (typeof value !== 'string' || value.length < minimum) importError(`${label} must be a non-empty string.`);
+}
+
+function validateImportedSourceRevision(value, label) {
+  requireImportObject(value, label);
+  if (!SOURCE_REVISION_STATUSES.has(value.status)) importError(`${label}.status is invalid.`);
+  if (typeof value.basis !== 'string' || !value.basis) importError(`${label}.basis is required.`);
+  if (value.sha !== null && value.sha !== undefined && !/^[a-f0-9]{40}$/i.test(String(value.sha))) importError(`${label}.sha is invalid.`);
+  if (value.status === 'VERIFIED' && !/^[a-f0-9]{40}$/i.test(String(value.sha || ''))) importError(`${label} cannot be VERIFIED without a valid SHA.`);
+  if (value.status === 'UNKNOWN' && value.sha !== null && value.sha !== undefined) importError(`${label} cannot be UNKNOWN with a SHA.`);
+}
+
+function validateImportedRelativePath(value, label) {
+  requireImportString(value, label);
+  if (path.isAbsolute(value) || path.posix.isAbsolute(value) || path.win32.isAbsolute(value)) importError(`${label} must be repository-relative.`);
+  const normalized = value.replace(/\\/g, '/');
+  if (normalized === '..' || normalized.startsWith('../') || normalized.split('/').includes('..')) importError(`${label} must not traverse a parent directory.`);
+}
+
+function validateImportedMeasurement(measurement, index) {
+  const label = `functionMeasurements[${index}]`;
+  requireImportObject(measurement, label);
+  for (const field of ['measurementId', 'engineVersion', 'metricId', 'metricVersion', 'language', 'path', 'functionId', 'functionName', 'astRole', 'unit', 'evidenceRef']) requireImportString(measurement[field], `${label}.${field}`);
+  if (measurement.engine !== ENGINE_NAME) importError(`${label}.engine must be ${ENGINE_NAME}.`);
+  validateImportedRelativePath(measurement.path, `${label}.path`);
+  if (!Number.isInteger(measurement.startLine) || measurement.startLine < 1 || !Number.isInteger(measurement.endLine) || measurement.endLine < measurement.startLine) importError(`${label} has an invalid source interval.`);
+  if (!Number.isFinite(measurement.value) || measurement.value < 0) importError(`${label}.value must be a finite non-negative number.`);
+  if (!MEASUREMENT_DIRECTIONS.has(measurement.direction)) importError(`${label}.direction is invalid.`);
+  if (!FUNCTION_MEASUREMENT_STATUSES.has(measurement.status)) importError(`${label}.status must be MEASURED.`);
+  requireImportObject(measurement.provenance, `${label}.provenance`);
+  if (!PROVENANCE_KINDS.has(measurement.provenance.kind)) importError(`${label}.provenance.kind is invalid.`);
+  requireImportString(measurement.provenance.reference, `${label}.provenance.reference`);
+  validateImportedSourceRevision(measurement.provenance.sourceRevision, `${label}.provenance.sourceRevision`);
+  if (measurement.provenance.contentSha256 !== undefined && !/^[a-f0-9]{64}$/i.test(String(measurement.provenance.contentSha256))) importError(`${label}.provenance.contentSha256 is invalid.`);
+  if (measurement.subtreeStartLine !== undefined && measurement.subtreeStartLine !== null && (!Number.isInteger(measurement.subtreeStartLine) || measurement.subtreeStartLine < 1)) importError(`${label}.subtreeStartLine is invalid.`);
+  if (measurement.subtreeEndLine !== undefined && measurement.subtreeEndLine !== null && (!Number.isInteger(measurement.subtreeEndLine) || measurement.subtreeEndLine < 1)) importError(`${label}.subtreeEndLine is invalid.`);
+  if (measurement.subtreeStartLine !== undefined && measurement.subtreeEndLine !== undefined && measurement.subtreeStartLine !== null && measurement.subtreeEndLine !== null && measurement.subtreeEndLine < measurement.subtreeStartLine) importError(`${label} has an invalid subtree interval.`);
+}
+
+function validateImportedCoverage(coverage, measurements) {
+  requireImportObject(coverage, 'maintainabilityCoverage');
+  if (coverage.schemaVersion !== '0.1-draft') importError('maintainabilityCoverage.schemaVersion is invalid.');
+  if (!COVERAGE_STATUSES.has(coverage.status)) importError('maintainabilityCoverage.status is invalid.');
+  for (const field of ['eligibleFiles', 'measuredFiles', 'excludedFiles', 'unsupportedFiles', 'errorFiles', 'engines']) if (!Array.isArray(coverage[field])) importError(`maintainabilityCoverage.${field} must be an array.`);
+  if (!Number.isInteger(coverage.functionsMeasured) || coverage.functionsMeasured < 0) importError('maintainabilityCoverage.functionsMeasured is invalid.');
+
+  const eligibleByPath = new Map();
+  for (const [index, file] of coverage.eligibleFiles.entries()) {
+    requireImportObject(file, `maintainabilityCoverage.eligibleFiles[${index}]`);
+    validateImportedRelativePath(file.path, `maintainabilityCoverage.eligibleFiles[${index}].path`);
+    if (eligibleByPath.has(file.path)) importError(`maintainabilityCoverage.eligibleFiles contains duplicate path ${file.path}.`);
+    eligibleByPath.set(file.path, file);
+    if (!['MEASURED', 'NOT_MEASURED', 'FAILURE'].includes(file.status)) importError(`maintainabilityCoverage.eligibleFiles[${index}].status is invalid.`);
+    if (!Number.isInteger(file.functionsMeasured) || file.functionsMeasured < 0) importError(`maintainabilityCoverage.eligibleFiles[${index}].functionsMeasured is invalid.`);
+  }
+  const measuredFiles = new Set();
+  for (const [index, filePath] of coverage.measuredFiles.entries()) {
+    validateImportedRelativePath(filePath, `maintainabilityCoverage.measuredFiles[${index}]`);
+    if (measuredFiles.has(filePath)) importError(`maintainabilityCoverage.measuredFiles contains duplicate path ${filePath}.`);
+    measuredFiles.add(filePath);
+    if (!eligibleByPath.has(filePath)) importError(`maintainabilityCoverage.measuredFiles contains unknown path ${filePath}.`);
+  }
+  for (const [collection, allowedStatuses] of [['excludedFiles', ['SKIPPED_BY_POLICY', 'FAILURE']], ['unsupportedFiles', ['NOT_MEASURED']], ['errorFiles', ['FAILURE']]]) {
+    for (const [index, file] of coverage[collection].entries()) {
+      requireImportObject(file, `maintainabilityCoverage.${collection}[${index}]`);
+      validateImportedRelativePath(file.path, `maintainabilityCoverage.${collection}[${index}].path`);
+      if (!allowedStatuses.includes(file.status)) importError(`maintainabilityCoverage.${collection}[${index}].status is invalid.`);
+      requireImportString(file.reason, `maintainabilityCoverage.${collection}[${index}].reason`);
+    }
+  }
+  for (const [index, engine] of coverage.engines.entries()) {
+    requireImportObject(engine, `maintainabilityCoverage.engines[${index}]`);
+    requireImportString(engine.name, `maintainabilityCoverage.engines[${index}].name`);
+    requireImportString(engine.version, `maintainabilityCoverage.engines[${index}].version`);
+    requireImportString(engine.parser, `maintainabilityCoverage.engines[${index}].parser`);
+  }
+  if (!coverage.engines.some((engine) => engine.name === ENGINE_NAME)) importError('maintainabilityCoverage.engines must include the maintainability engine.');
+
+  const functionIds = new Set();
+  const functionsByPath = new Map();
+  const metricKeys = new Set();
+  const identitiesByFunction = new Map();
+  for (const [index, measurement] of measurements.entries()) {
+    validateImportedMeasurement(measurement, index);
+    if (!eligibleByPath.has(measurement.path)) importError(`functionMeasurements[${index}].path is not an eligible file.`);
+    if (!measuredFiles.has(measurement.path)) importError(`functionMeasurements[${index}].path is not in measuredFiles.`);
+    functionIds.add(measurement.functionId);
+    const identity = [measurement.path, measurement.functionName, measurement.astRole, measurement.language, measurement.startLine, measurement.endLine].join('\0');
+    if (identitiesByFunction.has(measurement.functionId) && identitiesByFunction.get(measurement.functionId) !== identity) importError(`functionMeasurements contains conflicting identities for ${measurement.functionId}.`);
+    identitiesByFunction.set(measurement.functionId, identity);
+    if (!functionsByPath.has(measurement.path)) functionsByPath.set(measurement.path, new Set());
+    functionsByPath.get(measurement.path).add(measurement.functionId);
+    const metricKey = `${measurement.functionId}\0${measurement.metricId}`;
+    if (metricKeys.has(metricKey)) importError(`functionMeasurements contains duplicate metric ${measurement.metricId} for ${measurement.functionId}.`);
+    metricKeys.add(metricKey);
+  }
+  if (coverage.functionsMeasured !== functionIds.size) importError('maintainabilityCoverage.functionsMeasured does not match functionMeasurements.');
+  for (const [filePath, file] of eligibleByPath) {
+    const measuredCount = functionsByPath.get(filePath)?.size || 0;
+    if (file.functionsMeasured !== measuredCount) importError(`eligible file ${filePath} has an incoherent functionsMeasured count.`);
+  }
+  const hasErrors = coverage.errorFiles.length > 0 || coverage.eligibleFiles.some((file) => file.status === 'FAILURE');
+  const allEligibleMeasured = coverage.eligibleFiles.length > 0 && coverage.eligibleFiles.every((file) => file.status === 'MEASURED') && measuredFiles.size === coverage.eligibleFiles.length;
+  if (coverage.status === 'MEASURED' && (!allEligibleMeasured || hasErrors || coverage.excludedFiles.some((file) => file.status === 'FAILURE'))) importError('maintainabilityCoverage declares MEASURED but its inventory is incomplete or contains failures.');
+  if (coverage.status === 'MEASURED' && measurements.length === 0 && coverage.functionsMeasured !== 0) importError('maintainabilityCoverage declares MEASURED with an incoherent empty measurement set.');
+  if (coverage.status === 'PARTIAL' && !hasErrors) importError('maintainabilityCoverage declares PARTIAL without a recorded failure.');
+  if (coverage.status === 'FAILURE' && (measuredFiles.size > 0 || measurements.length > 0)) importError('maintainabilityCoverage declares FAILURE while retaining measured files.');
+  if ((coverage.status === 'NOT_MEASURED' || coverage.status === 'SKIPPED_BY_POLICY') && (measuredFiles.size > 0 || measurements.length > 0)) importError(`maintainabilityCoverage declares ${coverage.status} with measured files.`);
+}
+
+function importReport(root, reportPath) {
+  const resolved = physicallyConfinedReportPath(root, reportPath);
+  let report;
+  try { report = JSON.parse(fs.readFileSync(resolved, 'utf8')); } catch (error) {
+    throw new Error(`Invalid maintainability report JSON: ${error.message}`);
+  }
+  requireImportObject(report, 'maintainability report');
+  if (!Array.isArray(report.functionMeasurements) || !report.maintainabilityCoverage) importError('report must contain functionMeasurements and maintainabilityCoverage.');
+  if (report.sourceRevision !== undefined) validateImportedSourceRevision(report.sourceRevision, 'report.sourceRevision');
+  if (report.diagnostics !== undefined && !Array.isArray(report.diagnostics)) importError('report.diagnostics must be an array.');
+  const measurements = report.functionMeasurements;
+  validateImportedCoverage(report.maintainabilityCoverage, measurements);
+  const sourceRevision = sourceRevisionOrUnknown(report.sourceRevision);
+  const diagnostics = [...(Array.isArray(report.diagnostics) ? report.diagnostics : [])];
+  if (report.sourceRevision === undefined) diagnostics.push({ kind: 'MAINTAINABILITY_DIAGNOSTIC', code: 'SOURCE_REVISION_UNKNOWN', message: 'The imported report did not attest its source revision; checkout Git context was not used as a substitute.' });
+  return { status: report.maintainabilityCoverage.status, measurements, coverage: report.maintainabilityCoverage, diagnostics, sourceRevision };
 }
 
 module.exports = {

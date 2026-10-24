@@ -183,8 +183,88 @@ test('canonical function measurements validate, report offline and import withou
     fs.writeFileSync(reportPath, JSON.stringify({ functionMeasurements: result.measurements, maintainabilityCoverage: result.coverage }), 'utf8');
     const imported = importReport(fixture.root, reportPath, verifiedRevision());
     assert.deepEqual(imported.measurements, result.measurements);
+    assert.equal(imported.sourceRevision.status, 'UNKNOWN');
+    assert.equal(imported.sourceRevision.sha, null);
+    assert.equal(imported.diagnostics.some((diagnostic) => diagnostic.code === 'SOURCE_REVISION_UNKNOWN'), true);
   } finally {
     cleanup(fixture);
+  }
+});
+
+test('rejects an incomplete coverage that falsely declares MEASURED', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-maintainability-incomplete-import-'));
+  try {
+    const reportPath = path.join(root, 'incomplete.json');
+    fs.writeFileSync(reportPath, JSON.stringify({
+      functionMeasurements: [],
+      maintainabilityCoverage: {
+        schemaVersion: '0.1-draft',
+        status: 'MEASURED',
+        eligibleFiles: [],
+        measuredFiles: [],
+        excludedFiles: [],
+        unsupportedFiles: [],
+        errorFiles: [],
+        functionsMeasured: 0,
+        engines: [{ name: 'maintainability', version: '1.1.0', parser: 'qak-lexical-ast@1.0.0' }],
+      },
+    }), 'utf8');
+    assert.throws(() => importReport(root, reportPath), /declares MEASURED/);
+  } finally {
+    cleanupRoot(root);
+  }
+});
+
+test('imports a complete zero-function report without fabricating a function', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-maintainability-zero-functions-'));
+  try {
+    fs.writeFileSync(path.join(root, 'constants.js'), 'export const answer = 42;\n', 'utf8');
+    const revision = verifiedRevision('c');
+    const result = analyzeRepository(root, { sourceRevision: revision });
+    assert.equal(result.status, 'MEASURED');
+    assert.deepEqual(result.measurements, []);
+    const reportPath = path.join(root, 'complete-zero.json');
+    fs.writeFileSync(reportPath, JSON.stringify({
+      functionMeasurements: [],
+      maintainabilityCoverage: result.coverage,
+      sourceRevision: revision,
+    }), 'utf8');
+    const imported = importReport(root, reportPath);
+    assert.equal(imported.status, 'MEASURED');
+    assert.deepEqual(imported.measurements, []);
+    assert.equal(imported.sourceRevision.status, 'VERIFIED');
+    assert.equal(imported.sourceRevision.sha, revision.sha);
+  } finally {
+    cleanupRoot(root);
+  }
+});
+
+test('rejects an internal symlink to an external maintainability report before reading it', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-maintainability-symlink-import-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-maintainability-external-report-'));
+  const externalReport = path.join(outside, 'report.json');
+  const linkedReport = path.join(root, 'report.json');
+  try {
+    fs.writeFileSync(externalReport, JSON.stringify({ functionMeasurements: [], maintainabilityCoverage: {} }), 'utf8');
+    try { fs.symlinkSync(externalReport, linkedReport, 'file'); } catch (error) {
+      t.skip(`file symlinks unavailable: ${error.code || error.message}`);
+      return;
+    }
+    const originalReadFileSync = fs.readFileSync;
+    let outsideRead = false;
+    fs.readFileSync = (candidate, ...args) => {
+      if (path.resolve(String(candidate)) === path.resolve(externalReport)) outsideRead = true;
+      return originalReadFileSync.call(fs, candidate, ...args);
+    };
+    try {
+      assert.throws(() => importReport(root, linkedReport), /symbolic link|junction|outside/i);
+      assert.equal(outsideRead, false);
+    } finally {
+      fs.readFileSync = originalReadFileSync;
+    }
+  } finally {
+    cleanupRoot(root);
+    cleanupRoot(outside);
   }
 });
 

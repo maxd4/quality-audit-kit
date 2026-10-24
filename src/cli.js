@@ -473,7 +473,7 @@ async function scanCommand(positional, options) {
     let result;
     try {
       result = maintainabilityReport !== undefined
-        ? importMaintainabilityReport(target, maintainabilityReport === true ? 'maintainability-report.json' : String(maintainabilityReport), sourceRevisionForExecution(discovery))
+        ? importMaintainabilityReport(target, maintainabilityReport === true ? 'maintainability-report.json' : String(maintainabilityReport))
         : analyzeMaintainability(target, {
           sourceRevision: sourceRevisionForExecution(discovery),
           ...(config.quality?.maintainability && typeof config.quality.maintainability === 'object' ? config.quality.maintainability : {}),
@@ -484,10 +484,14 @@ async function scanCommand(positional, options) {
         measurements: [],
         coverage: { schemaVersion: '0.1-draft', status: 'FAILURE', eligibleFiles: [], measuredFiles: [], excludedFiles: [], unsupportedFiles: [], errorFiles: [], functionsMeasured: 0, engines: [] },
         diagnostics: [{ kind: 'MAINTAINABILITY_DIAGNOSTIC', code: 'IMPORT_FAILED', message: error.message }],
-        sourceRevision: sourceRevisionForExecution(discovery),
+        sourceRevision: maintainabilityReport !== undefined
+          ? { status: 'UNKNOWN', sha: null, basis: 'The maintainability report import failed before its source revision could be established.' }
+          : sourceRevisionForExecution(discovery),
       };
     }
-    const sourceRevision = result.sourceRevision || sourceRevisionForExecution(discovery);
+    const sourceRevision = result.sourceRevision || (maintainabilityReport !== undefined
+      ? { status: 'UNKNOWN', sha: null, basis: 'The imported maintainability report did not attest a source revision.' }
+      : sourceRevisionForExecution(discovery));
     engines.push({
       name: MAINTAINABILITY_ENGINE,
       version: MAINTAINABILITY_ENGINE_VERSION,

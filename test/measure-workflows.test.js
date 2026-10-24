@@ -51,6 +51,33 @@ function gitStatus(repository) {
   return spawnSync('git', ['-C', repository, 'status', '--porcelain'], { encoding: 'utf8', windowsHide: true }).stdout;
 }
 
+function createSymlinkOrSkip(t, target, linkPath, type) {
+  try {
+    fs.symlinkSync(target, linkPath, type);
+    return true;
+  } catch (error) {
+    if (['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) {
+      t.skip(`symbolic links are not executable in this environment (${error.code})`);
+      return false;
+    }
+    throw error;
+  }
+}
+
+function snapshotWithoutReading(snapshotRoot, forbiddenPath) {
+  const originalReadFileSync = fs.readFileSync;
+  let forbiddenReads = 0;
+  fs.readFileSync = (candidate, ...args) => {
+    if (path.resolve(String(candidate)) === path.resolve(forbiddenPath)) forbiddenReads += 1;
+    return originalReadFileSync.call(fs, candidate, ...args);
+  };
+  try {
+    return { snapshot: snapshotFiles(snapshotRoot), forbiddenReads };
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+}
+
 test('evaluation harness requires valid measured scan artifacts and records expected blocked steps', () => {
   const repository = makeRepository('positive');
   try {
@@ -166,5 +193,125 @@ test('snapshot file records include deterministic size and SHA-256 evidence', ()
     assert.equal(snapshot.ignoredFilesNotObserved, true);
   } finally {
     removeRepository(repository);
+  }
+});
+
+test('final symlink outside the repository is diagnosed without reading its target', (t) => {
+  const repository = makeRepository('symlink-final-outside');
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-harness-external-file-'));
+  try {
+    const trackedPath = path.join(repository, 'src', 'app.js');
+    const externalFile = path.join(external, 'secret.js');
+    fs.writeFileSync(externalFile, 'outside content must not be read\n', 'utf8');
+    fs.rmSync(trackedPath);
+    if (!createSymlinkOrSkip(t, externalFile, trackedPath, 'file')) return;
+    const { snapshot, forbiddenReads } = snapshotWithoutReading(repository, externalFile);
+    assert.equal(forbiddenReads, 0);
+    assert.equal(snapshot.status, 'NOT_VERIFIED');
+    assert.equal(snapshot.files['src/app.js'], undefined);
+    assert.ok(snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'SYMLINK_OUTSIDE_REPOSITORY'));
+  } finally {
+    removeRepository(repository);
+    removeRepository(external);
+  }
+});
+
+test('parent symlink outside the repository is diagnosed before a tracked child is read', (t) => {
+  const repository = makeRepository('symlink-parent-outside');
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-harness-external-parent-'));
+  try {
+    const sourceDirectory = path.join(repository, 'src');
+    const externalFile = path.join(external, 'app.js');
+    fs.writeFileSync(externalFile, 'outside parent content must not be read\n', 'utf8');
+    fs.rmSync(sourceDirectory, { recursive: true, force: true });
+    if (!createSymlinkOrSkip(t, external, sourceDirectory, process.platform === 'win32' ? 'junction' : 'dir')) return;
+    const { snapshot, forbiddenReads } = snapshotWithoutReading(repository, externalFile);
+    assert.equal(forbiddenReads, 0);
+    assert.equal(snapshot.status, 'NOT_VERIFIED');
+    assert.equal(snapshot.files['src/app.js'], undefined);
+    assert.ok(snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'SYMLINK_PARENT_OUTSIDE_REPOSITORY'));
+  } finally {
+    removeRepository(repository);
+    removeRepository(external);
+  }
+});
+
+test('ignored parent symlink cannot hide an already tracked child from confinement checks', (t) => {
+  const repository = makeRepository('symlink-parent-ignored');
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-harness-external-ignored-parent-'));
+  try {
+    const sourceDirectory = path.join(repository, 'src');
+    const externalFile = path.join(external, 'app.js');
+    fs.writeFileSync(path.join(repository, '.gitignore'), 'src\n', 'utf8');
+    const addIgnore = spawnSync('git', ['add', '--', '.gitignore'], { cwd: repository, encoding: 'utf8', windowsHide: true });
+    assert.equal(addIgnore.status, 0, addIgnore.stderr);
+    fs.writeFileSync(externalFile, 'ignored parent content must not be read\n', 'utf8');
+    fs.rmSync(sourceDirectory, { recursive: true, force: true });
+    if (!createSymlinkOrSkip(t, external, sourceDirectory, process.platform === 'win32' ? 'junction' : 'dir')) return;
+    const listed = spawnSync('git', ['-C', repository, 'ls-files', '--cached', '--others', '--exclude-standard', '-z'], { encoding: 'utf8', windowsHide: true });
+    assert.equal(String(listed.stdout).split('\0').includes('src/app.js'), true);
+    const { snapshot, forbiddenReads } = snapshotWithoutReading(repository, externalFile);
+    assert.equal(forbiddenReads, 0);
+    assert.equal(snapshot.status, 'NOT_VERIFIED');
+    assert.ok(snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'SYMLINK_PARENT_OUTSIDE_REPOSITORY'));
+  } finally {
+    removeRepository(repository);
+    removeRepository(external);
+  }
+});
+
+test('internal parent symlinks are refused explicitly by the snapshot policy', (t) => {
+  const repository = makeRepository('symlink-parent-internal');
+  try {
+    const sourceDirectory = path.join(repository, 'src');
+    const internalTarget = path.join(repository, 'src-target');
+    fs.mkdirSync(internalTarget);
+    const internalFile = path.join(internalTarget, 'app.js');
+    fs.writeFileSync(internalFile, 'internal target content\n', 'utf8');
+    fs.rmSync(sourceDirectory, { recursive: true, force: true });
+    if (!createSymlinkOrSkip(t, internalTarget, sourceDirectory, process.platform === 'win32' ? 'junction' : 'dir')) return;
+    const snapshot = snapshotFiles(repository);
+    assert.equal(snapshot.status, 'NOT_VERIFIED');
+    assert.ok(snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'SYMLINK_PARENT_NOT_ALLOWED'));
+  } finally {
+    removeRepository(repository);
+  }
+});
+
+test('broken final symlink is diagnosed without an uncontrolled read', (t) => {
+  const repository = makeRepository('symlink-final-broken');
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-harness-broken-link-'));
+  try {
+    const trackedPath = path.join(repository, 'src', 'app.js');
+    const missingTarget = path.join(external, 'missing.js');
+    fs.rmSync(trackedPath);
+    if (!createSymlinkOrSkip(t, missingTarget, trackedPath, 'file')) return;
+    const snapshot = snapshotFiles(repository);
+    assert.equal(snapshot.status, 'NOT_VERIFIED');
+    assert.equal(snapshot.files['src/app.js'], undefined);
+    assert.ok(snapshot.diagnostics.some((diagnostic) => diagnostic.code === 'SYMLINK_RESOLUTION_FAILED'));
+  } finally {
+    removeRepository(repository);
+    removeRepository(external);
+  }
+});
+
+test('an unverified content snapshot prevents PASS_WITH_LIMITS in the evaluation result', (t) => {
+  const repository = makeRepository('symlink-evaluation');
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-harness-external-evaluation-'));
+  try {
+    const sourceDirectory = path.join(repository, 'src');
+    const externalFile = path.join(external, 'app.js');
+    fs.writeFileSync(externalFile, 'evaluation content must not be read\n', 'utf8');
+    fs.rmSync(sourceDirectory, { recursive: true, force: true });
+    if (!createSymlinkOrSkip(t, external, sourceDirectory, process.platform === 'win32' ? 'junction' : 'dir')) return;
+    const result = evaluateTarget(repository, SARIF, 'symlink-evaluation');
+    assert.equal(result.contentSnapshot.status, 'NOT_VERIFIED');
+    assert.equal(result.contentPreserved, null);
+    assert.notEqual(result.status, 'PASS_WITH_LIMITS');
+    assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === 'SYMLINK_PARENT_OUTSIDE_REPOSITORY'));
+  } finally {
+    removeRepository(repository);
+    removeRepository(external);
   }
 });
