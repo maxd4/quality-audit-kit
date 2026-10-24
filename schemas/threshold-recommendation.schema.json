@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/quality-audit-kit/threshold-recommendation.schema.json",
+  "title": "Quality Audit Kit threshold recommendation",
+  "description": "Advisory local threshold recommendations. It never represents an automatically approved normative policy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "recommendationVersion", "kind", "runId", "status", "policyStatement", "profiles", "measurement", "series", "proposals", "noGlobalQualityScore"],
+  "properties": {
+    "schemaVersion": { "const": "0.1-draft" },
+    "recommendationVersion": { "const": "0.1-draft" },
+    "kind": { "const": "QUALITY_THRESHOLDS_RECOMMENDATION" },
+    "runId": { "type": ["string", "null"] },
+    "repository": { "type": ["string", "null"] },
+    "inputScope": { "type": ["string", "null"] },
+    "status": { "enum": ["AVAILABLE", "INSUFFICIENT_DATA"] },
+    "policyStatement": { "type": "string", "minLength": 1 },
+    "profiles": { "type": "array", "minItems": 3, "items": { "type": "object", "additionalProperties": false, "required": ["id", "label", "formula", "explanation"], "properties": { "id": { "enum": ["progressive", "balanced", "strict"] }, "label": { "type": "string" }, "formula": { "type": "string" }, "explanation": { "type": "string" } } } },
+    "measurement": { "type": "object", "additionalProperties": false, "required": ["explicitMetricRecordCount", "derivedFindingSeriesCount", "unavailableEngines", "warnings"], "properties": { "explicitMetricRecordCount": { "type": "integer", "minimum": 0 }, "derivedFindingSeriesCount": { "type": "integer", "minimum": 0 }, "unavailableEngines": { "type": "array", "items": { "type": "object", "additionalProperties": true } }, "warnings": { "type": "array", "items": { "type": "object", "additionalProperties": true } } } },
+    "series": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["seriesId", "metric", "dimensions", "distribution", "sampleCount", "generatedExcludedByDefault"], "properties": { "seriesId": { "type": "string" }, "metric": { "type": "object", "additionalProperties": false, "required": ["name", "unit", "direction"], "properties": { "name": { "type": "string" }, "unit": { "type": "string" }, "direction": { "enum": ["LOWER_IS_BETTER", "HIGHER_IS_BETTER"] } } }, "dimensions": { "type": "object", "additionalProperties": false, "required": ["language", "workspace", "fileCategory", "scope"], "properties": { "language": { "type": "string" }, "workspace": { "type": "string" }, "fileCategory": { "enum": ["runtime", "tests", "configuration", "generated", "unknown"] }, "scope": { "type": "string" } } }, "distribution": { "type": "object", "additionalProperties": true }, "sampleCount": { "type": "integer", "minimum": 1 }, "generatedExcludedByDefault": { "type": "boolean" } } } },
+    "proposals": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "noGlobalQualityScore": { "const": true }
+  }
+}

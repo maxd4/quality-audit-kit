@@ -785,3 +785,123 @@ test('plan exposes dependency cycles and does not merge unsupported relations', 
     cleanup(repository);
   }
 });
+
+test('thresholds recommend separates current measurements, objectives and ratchet caps', () => {
+  const repository = makeRepository('threshold-fixture');
+  try {
+    const run = measuredRun({ runId: 'threshold-run-001', seed: 'a' });
+    run.metrics = [
+      {
+        name: 'duplication_ratio',
+        values: [4, 8, 12, 6],
+        unit: 'percent',
+        status: 'MEASURED',
+        direction: 'LOWER_IS_BETTER',
+        language: 'javascript',
+        workspace: 'packages/app',
+        fileCategory: 'runtime',
+        findingCount: 3,
+      },
+      {
+        name: 'generated_warnings',
+        values: [1, 2, 3, 4],
+        unit: 'findings',
+        status: 'MEASURED',
+        fileCategory: 'generated',
+      },
+      {
+        name: 'tiny_sample',
+        value: 1,
+        unit: 'findings',
+        status: 'MEASURED',
+        fileCategory: 'tests',
+      },
+    ];
+    fs.writeFileSync(path.join(repository, 'run.json'), `${JSON.stringify(run, null, 2)}\n`);
+    fs.writeFileSync(path.join(repository, 'baseline.json'), `${JSON.stringify({
+      runId: 'baseline-001',
+      thresholds: { metrics: [{ name: 'duplication_ratio', unit: 'percent', direction: 'LOWER_IS_BETTER', language: 'javascript', workspace: 'packages/app', fileCategory: 'runtime', value: 10 }] },
+    }, null, 2)}\n`);
+
+    const result = runCli(repository, ['thresholds', 'recommend', 'run.json', '--baseline', 'baseline.json', '--output', 'recommendations.json', '--export', 'proposed.json', '--profile', 'balanced']);
+    assert.equal(result.status, 0, result.stderr);
+    const recommendation = JSON.parse(fs.readFileSync(path.join(repository, 'recommendations.json'), 'utf8'));
+    const runtime = recommendation.proposals.filter((proposal) => proposal.metric.name === 'duplication_ratio');
+    assert.deepEqual(new Set(runtime.map((proposal) => proposal.profile)), new Set(['progressive', 'balanced', 'strict']));
+    assert(runtime.every((proposal) => proposal.currentMeasurement.distribution.q95 !== undefined));
+    assert(runtime.every((proposal) => proposal.historicalRatchetCap.status === 'KNOWN'));
+    assert(runtime.every((proposal) => proposal.consequences.requiresExplicitApproval === true));
+    assert(runtime.every((proposal) => proposal.findingCount === 3));
+    assert(runtime.every((proposal) => proposal.recommendedObjective?.value <= 10));
+    assert(recommendation.noGlobalQualityScore);
+
+    const generated = recommendation.proposals.filter((proposal) => proposal.metric.name === 'generated_warnings');
+    assert(generated.every((proposal) => proposal.status === 'EXCLUDED_BY_DEFAULT'));
+    assert(generated.every((proposal) => proposal.recommendedObjective === null));
+    const insufficient = recommendation.proposals.filter((proposal) => proposal.metric.name === 'tiny_sample');
+    assert(insufficient.every((proposal) => proposal.status === 'INSUFFICIENT_DATA'));
+    assert(insufficient.every((proposal) => proposal.recommendedObjective === null));
+
+    const exported = JSON.parse(fs.readFileSync(path.join(repository, 'proposed.json'), 'utf8'));
+    assert.equal(exported.kind, 'QUALITY_THRESHOLDS_PROPOSAL');
+    assert.equal(exported.approvalRequired, true);
+    assert.equal(exported.profile, 'balanced');
+    assert.equal(fs.existsSync(path.join(repository, 'quality-audit-kit.config.json')), false);
+
+    const refused = runCli(repository, ['thresholds', 'recommend', 'run.json', '--apply']);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /--approve/);
+    assert.equal(fs.existsSync(path.join(repository, 'quality-audit-kit.config.json')), false);
+
+    const applied = runCli(repository, ['thresholds', 'recommend', 'run.json', '--apply', '--approve', '--profile', 'strict']);
+    assert.equal(applied.status, 0, applied.stderr);
+    const config = JSON.parse(fs.readFileSync(path.join(repository, 'quality-audit-kit.config.json'), 'utf8'));
+    assert.equal(config.quality.thresholds.profile, 'strict');
+    assert.equal(config.quality.thresholds.approval.kind, 'EXPLICIT_CLI_APPROVAL');
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('thresholds recommend exposes atypical, absent and inferred category measurements without inventing cleanliness', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const degraded = measuredRun({ runId: 'threshold-degraded-001', seed: 'b' });
+    degraded.qualityState = 'DEGRADED';
+    degraded.metrics = [{ name: 'errors', values: [1, 2, 100, 120], unit: 'findings', status: 'MEASURED', language: 'javascript', workspace: 'root', fileCategory: 'runtime' }];
+    fs.writeFileSync(path.join(repository, 'degraded.json'), `${JSON.stringify(degraded, null, 2)}\n`);
+    const degradedResult = runCli(repository, ['thresholds', 'recommend', 'degraded.json']);
+    assert.equal(degradedResult.status, 0, degradedResult.stderr);
+    const degradedRecommendation = JSON.parse(degradedResult.stdout);
+    assert(degradedRecommendation.proposals.every((proposal) => proposal.status === 'REVIEW_REQUIRED'));
+    assert(degradedRecommendation.proposals.every((proposal) => proposal.recommendedObjective === null));
+    assert(degradedRecommendation.series[0].distribution.q95 > degradedRecommendation.series[0].distribution.q50);
+
+    const incomplete = measuredRun({ runId: 'threshold-incomplete-001', seed: 'c', measurementStatus: 'FAILURE' });
+    fs.writeFileSync(path.join(repository, 'incomplete.json'), `${JSON.stringify(incomplete, null, 2)}\n`);
+    const incompleteResult = runCli(repository, ['thresholds', 'recommend', 'incomplete.json']);
+    assert.equal(incompleteResult.status, 0, incompleteResult.stderr);
+    const incompleteRecommendation = JSON.parse(incompleteResult.stdout);
+    assert.equal(incompleteRecommendation.status, 'INSUFFICIENT_DATA');
+    assert(incompleteRecommendation.measurement.warnings.some((warning) => warning.status === 'FAILURE'));
+
+    const categorized = measuredRun({
+      runId: 'threshold-categories-001',
+      seed: 'd',
+      findings: [
+        { id: 'finding-runtime-001', path: 'src/main.js', message: 'runtime' },
+        { id: 'finding-tests-001', path: 'tests/main.test.js', message: 'tests' },
+        { id: 'finding-config-001', path: 'config/settings.json', message: 'configuration' },
+        { id: 'finding-generated-001', path: 'dist/generated.js', message: 'generated' },
+      ],
+    });
+    fs.writeFileSync(path.join(repository, 'categorized.json'), `${JSON.stringify(categorized, null, 2)}\n`);
+    const categorizedResult = runCli(repository, ['thresholds', 'recommend', 'categorized.json']);
+    assert.equal(categorizedResult.status, 0, categorizedResult.stderr);
+    const categorizedRecommendation = JSON.parse(categorizedResult.stdout);
+    assert.deepEqual(new Set(categorizedRecommendation.series.map((series) => series.dimensions.fileCategory)), new Set(['runtime', 'tests', 'configuration', 'generated']));
+    assert(categorizedRecommendation.proposals.filter((proposal) => proposal.dimensions.fileCategory === 'generated').every((proposal) => proposal.status === 'EXCLUDED_BY_DEFAULT'));
+  } finally {
+    cleanup(repository);
+  }
+});

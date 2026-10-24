@@ -11,7 +11,7 @@
     "quality-audit-kit": "bin/quality-audit-kit.js"
   },
   "scripts": {
-    "check": "node --check bin/quality-audit-kit.js && node --check src/cli.js && node --check src/discovery.js && node --check src/history.js && node --check src/normalize.js && node --check src/scanners.js && node --check src/report.js && node --check src/planner.js && node --check src/templates.js",
+    "check": "node --check bin/quality-audit-kit.js && node --check src/cli.js && node --check src/discovery.js && node --check src/history.js && node --check src/normalize.js && node --check src/scanners.js && node --check src/report.js && node --check src/planner.js && node --check src/thresholds.js && node --check src/templates.js",
     "test": "node --test"
   }
 }

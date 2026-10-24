@@ -32,6 +32,36 @@
           "minLength": 1
         }
       }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "unit", "status"],
+      "anyOf": [
+        { "required": ["value"] },
+        { "required": ["values"] }
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "type": "number", "minimum": 0 },
+        "values": {
+          "type": "array",
+          "items": { "type": "number", "minimum": 0 },
+          "minItems": 1
+        },
+        "unit": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["MEASURED", "NOT_MEASURED", "FAILURE", "UNAVAILABLE"] },
+        "direction": { "enum": ["LOWER_IS_BETTER", "HIGHER_IS_BETTER"] },
+        "language": { "type": "string" },
+        "workspace": { "type": "string" },
+        "fileCategory": { "enum": ["runtime", "tests", "configuration", "generated", "unknown"] },
+        "scope": { "type": "string" },
+        "findingCount": { "type": "integer", "minimum": 0 },
+        "findingIds": { "type": "array", "items": { "type": "string" } },
+        "degraded": { "type": "boolean" },
+        "qualityState": { "type": "string" },
+        "provenance": { "type": "object", "additionalProperties": true }
+      }
     }
   },
   "type": "object",
@@ -624,6 +654,10 @@
           }
         }
       }
+    },
+    "metrics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/metric" }
     }
   }
 }

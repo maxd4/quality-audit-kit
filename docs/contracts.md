@@ -78,11 +78,18 @@ The existing triage decision schema remains the decision evidence contract. The 
 
 The configured ratchet defaults to zero new `HIGH`/`CRITICAL` findings. `maxNewBlockingFindings` and optional `maxMeasuredFindings` are ceilings. Increasing a ceiling, removing a blocking severity or making a finite ceiling unlimited is a policy relaxation and fails the gate. A measured reduction may produce a `STRICTER_CEILING` proposal with `EXPLICIT_REVIEW_REQUIRED`; no baseline, decision or policy is changed implicitly.
 
+## Threshold recommendations
+
+An optional run-level `metrics` array carries numeric measurements with `name`, `unit`, `status`, optional repeated `values`, direction (`LOWER_IS_BETTER` or `HIGHER_IS_BETTER`), language, workspace, file category and finding count. The `thresholds recommend` command groups explicit measurements, or derives only measured finding counts when no explicit metrics are available. It reports descriptive quantiles and extremes, but recommendation formulas use only q50, q25 or an observed extreme; q90/q95 are never normative inputs. Failed, skipped or unavailable measurements remain warnings, and absent measurements are not zero.
+
+Each proposal has separate current measurement, recommended objective and historical ratchet cap fields. Generated files are excluded by default, degraded series require review, and fewer than four observations are insufficient. Exported proposals always carry `approvalRequired`; only an explicit `--apply --approve` operation can modify normative thresholds.
+
 ## Draft files
 
 - [`audit-run.schema.json`](../schemas/audit-run.schema.json)
 - [`triage-decision.schema.json`](../schemas/triage-decision.schema.json)
 - [`plan.schema.json`](../schemas/plan.schema.json)
+- [`threshold-recommendation.schema.json`](../schemas/threshold-recommendation.schema.json)
 - [Synthetic run](../examples/run.example.json)
 - [Synthetic decisions](../examples/decisions.example.json)
 

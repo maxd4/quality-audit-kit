@@ -19,6 +19,8 @@ quality-audit-kit report --verify-bundle file.zip
 quality-audit-kit plan run.json [--output plan.json] [--markdown plan.md] [--baseline file] [--decisions file]
 quality-audit-kit plan --next [plan.json]
 quality-audit-kit plan --export plan.json [--output prompts-directory]
+quality-audit-kit thresholds recommend run.json [--baseline file] [--format json|markdown] [--output file] [--export config.json] [--profile progressive|balanced|strict]
+quality-audit-kit thresholds recommend run.json --apply --approve [--profile progressive|balanced|strict]
 ```
 
 When running from a checkout without a package installation, use `node bin/quality-audit-kit.js` in place of `quality-audit-kit`.
@@ -85,6 +87,16 @@ The order is explained, not scored: confirmed security, regressions, broken cont
 `plan --next plan.json` returns the highest-priority lot with all predecessors available. It returns `NEEDS_TRIAGE`, `BLOCKED_BY_MEASUREMENT` or `NEEDS_REVIEW` instead of selecting a correction when the evidence is insufficient. `plan --export plan.json --output codex-prompts` writes one autonomous prompt per lot. Prompts include the objective, approved files, findings and provenance, invariants, verification checks and a stop condition. They do not execute Codex, modify source, change a baseline or install dependencies.
 
 Optional planning annotations belong under a finding's `planning` object in the audit-run contract. In particular, `commonCauseId` plus `commonCauseEvidence`/`commonCauseConfirmed` is required for cross-finding grouping; `responsibility`, `category`, `confidence`, `consumers`, `estimatedCost`, `changeRisk` and explicit dependency fields refine the plan without becoming an opaque score.
+
+## Threshold recommendations
+
+`thresholds recommend run.json` is a local advisory policy counselor. It consumes explicit `run.metrics` records when available and otherwise derives only `finding_count` series from findings whose engines and findings are `MEASURED`. It never changes the source tree, baseline, decisions or configuration by default.
+
+Each series is separated by metric, language, workspace, file category (`runtime`, `tests`, `configuration`, `generated` or `unknown`) and scope. The JSON and Markdown outputs include count, minimum, maximum, mean, q25, median, q75, q90, q95, IQR outliers, historical-cap exceedances and recommended-target exceedances. The three profiles are explainable: progressive uses q50, balanced uses q25 for lower-is-better metrics (otherwise q50), and strict uses the observed extreme. High quantiles are descriptive only; q90/q95 and high quantiles from a repository marked `DEGRADED` are never promoted to a normative threshold. A degraded series is `REVIEW_REQUIRED`, a generated series is `EXCLUDED_BY_DEFAULT`, and a series with fewer than four observations is `INSUFFICIENT_DATA`.
+
+Every proposal distinguishes `currentMeasurement`, `recommendedObjective` and `historicalRatchetCap`. It also reports justification, affected finding count, confidence and application consequences. Missing, failed or skipped scanners produce warnings and no zero-valued measurements. No global quality score is computed.
+
+`--export file.json` writes an approval-required configuration proposal and does not modify `quality-audit-kit.config.json`. Normative mutation is rejected unless both `--apply` and explicit `--approve` are present. An approved application records the selected profile, source run and `EXPLICIT_CLI_APPROVAL`; it does not raise or silently relax a historical ratchet.
 
 ## Contract boundaries
 

@@ -23,6 +23,7 @@ const {
   writeOutput,
 } = require('./report');
 const { buildPlan, nextLot, renderPlanMarkdown } = require('./planner');
+const { buildThresholdConfig, recommendThresholds, renderThresholdsMarkdown } = require('./thresholds');
 const {
   TEMPLATE_FILES,
   buildAgentPrompt,
@@ -58,7 +59,7 @@ function parseArguments(argv) {
     }
     const name = token.slice(2);
     const next = tokens[index + 1];
-    if (next && !next.startsWith('--') && !['help', 'force', 'preview', 'update-templates', 'link-agents', 'replace', 'next', 'export'].includes(name)) {
+    if (next && !next.startsWith('--') && !['help', 'force', 'preview', 'update-templates', 'link-agents', 'replace', 'next', 'apply', 'approve'].includes(name)) {
       options[name] = next;
       index += 1;
     } else {
@@ -676,7 +677,10 @@ function planContext(inputPath, options) {
 
 function planCommand(positional, options) {
   if (options.next) return planNextCommand(positional, options);
-  if (options.export) return planExportCommand(positional, options);
+  if (options.export) {
+    const exportInput = options.export === true ? positional[0] : options.export;
+    return planExportCommand(options.export === true ? positional : [exportInput], options);
+  }
   const input = positional[0] || options.run;
   if (!input) throw new Error('plan requires an audit run JSON path.');
   const context = planContext(input, options);
@@ -755,6 +759,56 @@ function reportCommand(positional, options) {
   else process.stdout.write(content);
 }
 
+function thresholdsCommand(positional, options) {
+  if (positional[0] !== 'recommend') throw new Error('thresholds requires the recommend subcommand.');
+  const input = positional[1] || options.run;
+  if (!input) throw new Error('thresholds recommend requires an audit run JSON path.');
+  const resolvedInput = path.resolve(process.cwd(), input);
+  const run = readJson(resolvedInput);
+  const target = findRepositoryRoot(options.repository || path.dirname(resolvedInput));
+  const config = loadConfig(target);
+  const quality = configuredQuality(target, config);
+  const baselinePath = options.baseline !== undefined
+    ? resolveRepositoryFile(target, options.baseline, quality.baseline)
+    : fs.existsSync(resolveRepositoryFile(target, quality.baseline, quality.baseline))
+      ? resolveRepositoryFile(target, quality.baseline, quality.baseline)
+      : null;
+  const baseline = baselinePath && fs.existsSync(baselinePath) ? readJson(baselinePath) : null;
+  const result = recommendThresholds(run, { baseline, config });
+  const format = options.format || 'json';
+  if (!['json', 'markdown'].includes(format)) throw new Error(`Unsupported thresholds format: ${format}`);
+  const outputPath = options.output && options.output !== '-'
+    ? path.resolve(process.cwd(), options.output)
+    : null;
+  const content = format === 'markdown'
+    ? renderThresholdsMarkdown(result)
+    : `${JSON.stringify(result, null, 2)}\n`;
+  if (outputPath) writeOutput(outputPath, content);
+  else process.stdout.write(content);
+
+  if (options.export !== undefined) {
+    const exportPath = path.resolve(process.cwd(), options.export === true ? 'quality-audit-kit.thresholds.proposed.json' : options.export);
+    const profile = options.profile || 'balanced';
+    if (!['progressive', 'balanced', 'strict'].includes(profile)) throw new Error(`Unsupported thresholds profile: ${profile}`);
+    writeOutput(exportPath, `${JSON.stringify(buildThresholdConfig(result, profile), null, 2)}\n`);
+  }
+
+  if (options.apply) {
+    if (!options.approve) throw new Error('thresholds --apply requires explicit --approve; recommendations and exports never mutate normative policy.');
+    const profile = options.profile || 'balanced';
+    if (!['progressive', 'balanced', 'strict'].includes(profile)) throw new Error(`Unsupported thresholds profile: ${profile}`);
+    const proposal = buildThresholdConfig(result, profile);
+    if (!proposal.thresholds.length) throw new Error('No sufficiently measured threshold proposal is available for normative application.');
+    const updated = { ...config, quality: { ...(config.quality || {}), thresholds: {
+      profile,
+      ratchet: { metrics: proposal.thresholds, runId: result.runId },
+      approval: { kind: 'EXPLICIT_CLI_APPROVAL', runId: result.runId },
+    } } };
+    writeJson(path.join(target, CONFIG_FILENAME), updated);
+  }
+  return result;
+}
+
 function printHelp() {
   process.stdout.write(`Quality Audit Kit ${require('../package.json').version} (experimental)\n\nUsage:\n  quality-audit-kit init [repository] [--force] [--templates deterministic|none] [--update-templates] [--preview]\n  quality-audit-kit init [repository] --agent codex [--agent-prompt file] [--agent-input file]\n  quality-audit-kit context refresh [repository] [--preview]\n  quality-audit-kit init [repository] --link-agents\n  quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--run[=knip,jscpd]] [--baseline file] [--decisions file]\n  quality-audit-kit baseline run.json [--output file] [--replace] [--preview]\n  quality-audit-kit triage run.json [--baseline file] [--decisions file] [--finding id --decision FIX|DEFER|KEEP_JUSTIFIED|FALSE_POSITIVE --reason text --reviewer name --reviewed-revision sha --evidence TYPE|REFERENCE|OUTCOME]\n  quality-audit-kit report run.json [--format markdown|json] [--output file]\n\ninit creates protected generic PROJECT_HANDOFF.md and COMMIT_REVIEW.md templates. Existing documents are never overwritten by default; --update-templates refreshes only managed generated blocks and preserves manual sections. --preview emits deterministic diff previews without mutation.\ncontext refresh updates only detected facts and controls, reports changed values and contradictions, and preserves all instructions and manual decisions.\n--agent codex prepares a Codex customization request; it does not execute an agent or contact a service unless explicit input is supplied with --agent-input.\nscan imports existing JSON reports by default. --run explicitly executes installed local scanners; it never installs dependencies. With --baseline it compares only complete, compatible measurements and applies the configured ratchet.\nbaseline creates an explicit, versioned baseline; replacing one requires --replace and never increases a configured ceiling automatically. triage appends an evidence-backed decision or reports stale decisions.\nNo scanner, failed scanner, incomplete audit, or unmeasured scanner is treated as a clean result.\n`);
 }
@@ -767,9 +821,13 @@ function printPlanHelp() {
   process.stdout.write('\nPlan usage:\n  quality-audit-kit plan run.json [--output plan.json] [--markdown plan.md] [--baseline file] [--decisions file]\n  quality-audit-kit plan --next [plan.json] [--output next.json]\n  quality-audit-kit plan --export plan.json [--output prompts-directory]\n\nplan creates deterministic correction lots and autonomous Codex prompts. Grouping requires explicit common-cause evidence; uncertain findings, stale decisions, missing measurements and dependency cycles remain visible and block silent correction claims.\n');
 }
 
+function printThresholdsHelp() {
+  process.stdout.write('\nThresholds usage:\n  quality-audit-kit thresholds recommend run.json [--baseline file] [--format json|markdown] [--output file] [--export config.json] [--profile progressive|balanced|strict]\n  quality-audit-kit thresholds recommend run.json --apply --approve [--profile progressive|balanced|strict]\n\nthresholds recommend is a local advisory analysis. It reports distributions, quantiles, extremes, exceedances and three explainable profiles by metric, language, workspace and file category. Generated files, unavailable scanners, failed measurements and insufficient samples do not become zero findings. --export writes a proposal; only --apply --approve can modify normative thresholds.\n');
+}
+
 async function main(argv) {
   const { command, options, positional } = parseArguments(argv);
-  if (options.help || command === 'help' || command === '--help') { printHelpDetailed(); printPlanHelp(); return; }
+  if (options.help || command === 'help' || command === '--help') { printHelpDetailed(); printPlanHelp(); printThresholdsHelp(); return; }
   if (options.version || command === '--version') return process.stdout.write(`${require('../package.json').version}\n`);
   if (command === 'init') return initCommand(positional, options);
   if (command === 'context') {
@@ -781,6 +839,7 @@ async function main(argv) {
   if (command === 'triage') return triageCommand(positional, options);
   if (command === 'plan') return planCommand(positional, options);
   if (command === 'report') return reportCommand(positional, options);
+  if (command === 'thresholds') return thresholdsCommand(positional, options);
   throw new Error(`Unknown command: ${command}. Use --help for usage.`);
 }
 
