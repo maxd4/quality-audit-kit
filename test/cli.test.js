@@ -284,6 +284,155 @@ test('setup preserves an unmanaged project instruction without overwriting it', 
   }
 });
 
+test('setup refuses a state path outside the repository before creating any artifact', () => {
+  const repository = makeEmptyRepository();
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'quality-audit-kit-external-state-'));
+  try {
+    for (const option of ['--state', '--output']) {
+      const statePath = path.join(external, `${option.slice(2)}-state.json`);
+      const result = runCli(repository, ['setup', option, statePath]);
+      assert.equal(result.status, 2, `${result.stderr}\n${result.stdout}`);
+      const blocked = JSON.parse(result.stdout);
+      assert.equal(blocked.status, 'BLOCKED');
+      assert.match(blocked.diagnostic, /physical analyzed repository|inside/i);
+      assert.equal(fs.existsSync(statePath), false);
+    }
+    assert.deepEqual(fs.readdirSync(repository), []);
+  } finally {
+    cleanup(repository);
+    cleanup(external);
+  }
+});
+
+test('setup rejects an internal lexical path that crosses a directory symlink', (t) => {
+  const repository = makeEmptyRepository();
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'quality-audit-kit-external-link-'));
+  try {
+    const link = path.join(repository, 'linked');
+    try {
+      fs.symlinkSync(external, link, 'junction');
+    } catch (error) {
+      if (['EPERM', 'EACCES', 'UNKNOWN'].includes(error.code)) {
+        t.skip(`directory symlinks are not executable in this environment (${error.code})`);
+        return;
+      }
+      throw error;
+    }
+    const statePath = path.join(link, 'quality-audit-kit.setup.json');
+    const result = runCli(repository, ['setup', '--state', statePath]);
+    assert.equal(result.status, 2, `${result.stderr}\n${result.stdout}`);
+    const blocked = JSON.parse(result.stdout);
+    assert.equal(blocked.status, 'BLOCKED');
+    assert.match(blocked.diagnostic, /symbolic-link|physical|inside/i);
+    assert.equal(fs.existsSync(path.join(external, 'quality-audit-kit.setup.json')), false);
+  } finally {
+    cleanup(repository);
+    cleanup(external);
+  }
+});
+
+test('setup creates an explicit state artifact under a safe missing in-repository parent', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const statePath = path.join(repository, 'artifacts', 'setup', 'state.json');
+    const result = runCli(repository, ['setup', '--state', statePath]);
+    assert.equal(result.status, 2, `${result.stderr}\n${result.stdout}`);
+    assert.equal(fs.existsSync(statePath), true);
+    assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).statePath, statePath);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('setup resume refuses an external state before parsing it', () => {
+  const repository = makeEmptyRepository();
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'quality-audit-kit-external-resume-'));
+  try {
+    const statePath = path.join(external, 'quality-audit-kit.setup.json');
+    fs.writeFileSync(statePath, '{not-json', 'utf8');
+    const result = runCli(repository, ['setup', '--resume', statePath]);
+    assert.equal(result.status, 2, `${result.stderr}\n${result.stdout}`);
+    const blocked = JSON.parse(result.stdout);
+    assert.equal(blocked.status, 'BLOCKED');
+    assert.match(blocked.diagnostic, /physical analyzed repository|inside/i);
+    assert.equal(fs.readdirSync(repository).length, 0);
+  } finally {
+    cleanup(repository);
+    cleanup(external);
+  }
+});
+
+test('setup resume blocks an external run artifact before reading or creating it', () => {
+  const repository = makeEmptyRepository();
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'quality-audit-kit-external-run-'));
+  try {
+    const first = runCli(repository, ['setup']);
+    assert.equal(first.status, 2, first.stderr);
+    const statePath = path.join(repository, 'quality-audit-kit.setup.json');
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    const externalRun = path.join(external, 'run.json');
+    state.artifacts.runPath = externalRun;
+    fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+
+    const resumed = runCli(repository, ['setup', '--resume', statePath]);
+    assert.equal(resumed.status, 2, `${resumed.stderr}\n${resumed.stdout}`);
+    const blocked = JSON.parse(resumed.stdout);
+    assert.equal(blocked.status, 'BLOCKED');
+    assert.match(blocked.missingInformation.join('\n'), /physical analyzed repository|inside/i);
+    assert.equal(fs.existsSync(externalRun), false);
+  } finally {
+    cleanup(repository);
+    cleanup(external);
+  }
+});
+
+test('setup resume blocks an external report artifact without reading or overwriting it', () => {
+  const repository = makeEmptyRepository();
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), 'quality-audit-kit-external-report-'));
+  try {
+    const first = runCli(repository, ['setup']);
+    assert.equal(first.status, 2, first.stderr);
+    const statePath = path.join(repository, 'quality-audit-kit.setup.json');
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    const externalReport = path.join(external, 'report.md');
+    const original = '# external report must remain untouched\n';
+    fs.writeFileSync(externalReport, original, 'utf8');
+    state.artifacts.reportPath = externalReport;
+    fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+
+    const resumed = runCli(repository, ['setup', '--resume', statePath]);
+    assert.equal(resumed.status, 2, `${resumed.stderr}\n${resumed.stdout}`);
+    const blocked = JSON.parse(resumed.stdout);
+    assert.equal(blocked.status, 'BLOCKED');
+    assert.equal(fs.readFileSync(externalReport, 'utf8'), original);
+  } finally {
+    cleanup(repository);
+    cleanup(external);
+  }
+});
+
+test('setup keeps an existing state file mode while blocking a non-file destination', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const first = runCli(repository, ['setup']);
+    assert.equal(first.status, 2, first.stderr);
+    const statePath = path.join(repository, 'quality-audit-kit.setup.json');
+    const modeBefore = fs.statSync(statePath).mode & 0o7777;
+    const directoryPath = path.join(repository, 'state-directory');
+    fs.mkdirSync(directoryPath);
+    const blocked = runCli(repository, ['setup', '--state', directoryPath]);
+    assert.equal(blocked.status, 2, `${blocked.stderr}\n${blocked.stdout}`);
+    assert.match(JSON.parse(blocked.stdout).diagnostic, /regular file|destination/i);
+    if (process.platform !== 'win32') {
+      const resumed = runCli(repository, ['setup', '--resume', statePath]);
+      assert.equal(resumed.status, 2, resumed.stderr);
+      assert.equal(fs.statSync(statePath).mode & 0o7777, modeBefore);
+    }
+  } finally {
+    cleanup(repository);
+  }
+});
+
 test('template refresh previews and preserves manual decisions idempotently', () => {
   const repository = makeRepository('template-refresh-fixture');
   try {

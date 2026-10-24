@@ -112,9 +112,11 @@ function preserveWindowsAcl(sourcePath, destinationPath) {
   throw new Error('No supported Windows ACL tool is available for safe configuration replacement.');
 }
 
-function writeJsonAtomicReplace(filePath, value) {
+function writeJsonAtomicReplace(filePath, value, boundaryRoot) {
   const target = path.resolve(filePath);
+  if (boundaryRoot) setupPathInsideRepository(boundaryRoot, target, path.basename(target));
   fs.mkdirSync(path.dirname(target), { recursive: true });
+  if (boundaryRoot) setupPathInsideRepository(boundaryRoot, target, path.basename(target));
   const lockPath = `${target}.qak-lock`;
   const tempPath = `${target}.qak-tmp-${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
   const lockToken = `${process.pid}:${crypto.randomBytes(8).toString('hex')}`;
@@ -1180,13 +1182,75 @@ function trendsCommand(positional, options) {
 const SETUP_STEP_IDS = ['DISCOVERY', 'INITIALIZATION', 'PERSONALIZATION', 'AUDIT', 'REPORT', 'SUMMARY'];
 const SETUP_FINAL_STATUSES = new Set(['IN_PROGRESS', 'COMPLETE', 'PARTIAL', 'BLOCKED']);
 
-function setupPathInsideRepository(root, value, fallback) {
-  const selected = value === undefined || value === true ? fallback : String(value);
-  const candidate = path.resolve(path.isAbsolute(selected) ? selected : path.resolve(process.cwd(), selected));
+function isPathInside(root, candidate) {
   const relative = path.relative(root, candidate);
-  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error('setup artifact paths must remain inside the analyzed repository.');
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function resolveSetupRepositoryRoot(root) {
+  const lexicalRoot = path.resolve(root);
+  let rootStat;
+  try {
+    rootStat = fs.statSync(lexicalRoot);
+  } catch {
+    throw new Error(`Setup repository root does not exist: ${lexicalRoot}`);
   }
+  if (!rootStat.isDirectory()) throw new Error(`Setup repository root is not a directory: ${lexicalRoot}`);
+  return fs.realpathSync.native(lexicalRoot);
+}
+
+function nearestExistingSetupPath(candidate) {
+  let current = candidate;
+  while (true) {
+    try {
+      fs.lstatSync(current);
+      return current;
+    } catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error;
+      const parent = path.dirname(current);
+      if (parent === current) throw new Error(`Cannot inspect setup artifact path: ${candidate}`);
+      current = parent;
+    }
+  }
+}
+
+function rejectSetupSymlinkComponents(root, existingPath, candidate) {
+  const relative = path.relative(root, existingPath);
+  let current = root;
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    const stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Setup artifact path cannot use a symbolic-link component: ${candidate}`);
+    }
+  }
+}
+
+function setupPathInsideRepository(root, value, fallback) {
+  const physicalRoot = resolveSetupRepositoryRoot(root);
+  const isDefault = value === undefined || value === true;
+  const selected = isDefault ? fallback : String(value);
+  const base = isDefault ? physicalRoot : process.cwd();
+  const candidate = path.resolve(path.isAbsolute(selected) ? selected : path.resolve(base, selected));
+  if (!isPathInside(physicalRoot, candidate)) throw new Error('Setup artifact paths must remain inside the physical analyzed repository.');
+  const existingPath = nearestExistingSetupPath(candidate);
+  rejectSetupSymlinkComponents(physicalRoot, existingPath, candidate);
+  const existingPathStat = fs.lstatSync(existingPath);
+  if (existingPath !== candidate && !existingPathStat.isDirectory()) {
+    throw new Error(`Setup artifact parent must be a directory: ${existingPath}`);
+  }
+  const physicalExistingPath = fs.realpathSync.native(existingPath);
+  if (!isPathInside(physicalRoot, physicalExistingPath)) {
+    throw new Error('Setup artifact paths must remain inside the physical analyzed repository.');
+  }
+  let candidateStat;
+  try {
+    candidateStat = fs.lstatSync(candidate);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  if (candidateStat?.isSymbolicLink()) throw new Error(`Setup artifact path cannot be a symbolic link: ${candidate}`);
+  if (candidateStat && !candidateStat.isFile()) throw new Error(`Setup artifact destination must be a regular file: ${candidate}`);
   return candidate;
 }
 
@@ -1197,6 +1261,18 @@ function validateSetupState(state) {
   }
   if (!state.repository || typeof state.repository.root !== 'string' || !path.isAbsolute(state.repository.root)) {
     throw new Error('Setup state must contain an absolute repository root.');
+  }
+  if (typeof state.statePath !== 'string' || !path.isAbsolute(state.statePath)) {
+    throw new Error('Setup state must contain an absolute state path.');
+  }
+  if (!state.artifacts || typeof state.artifacts !== 'object' || Array.isArray(state.artifacts)) {
+    throw new Error('Setup state artifacts must contain a JSON object.');
+  }
+  for (const artifactName of ['runPath', 'reportPath']) {
+    if (state.artifacts[artifactName] !== undefined
+      && (typeof state.artifacts[artifactName] !== 'string' || !path.isAbsolute(state.artifacts[artifactName]))) {
+      throw new Error(`Setup state artifacts.${artifactName} must be an absolute path.`);
+    }
   }
   if (!SETUP_FINAL_STATUSES.has(state.status)) throw new Error('Setup state status is invalid.');
   if (!Array.isArray(state.steps) || !Array.isArray(state.commands) || !Array.isArray(state.files)) {
@@ -1307,17 +1383,24 @@ async function setupCommand(positional, options) {
   let state = null;
   let target;
   let statePath;
+  let confinementRoot;
   let currentStep = 'DISCOVERY';
   try {
     const resumeValue = options.resume;
     if (resumeValue !== undefined && resumeValue !== true) {
-      const candidate = path.resolve(process.cwd(), String(resumeValue));
+      const resumeRoot = resolveSetupRepositoryRoot(findRepositoryRoot(process.cwd()));
+      confinementRoot = resumeRoot;
+      const candidate = setupPathInsideRepository(resumeRoot, resumeValue, SETUP_STATE_FILENAME);
       const prior = validateSetupState(readJson(candidate));
-      target = path.resolve(prior.repository.root);
+      if (path.resolve(prior.repository.root) !== resumeRoot) {
+        throw new Error('Setup state repository root does not match the physical repository used for resume.');
+      }
+      target = resumeRoot;
       statePath = setupPathInsideRepository(target, candidate, SETUP_STATE_FILENAME);
       state = { ...prior, resumed: true, statePath };
     } else {
-      target = findRepositoryRoot(positional[0] || process.cwd());
+      target = resolveSetupRepositoryRoot(findRepositoryRoot(positional[0] || process.cwd()));
+      confinementRoot = target;
       statePath = setupPathInsideRepository(target, options.state || options.output, SETUP_STATE_FILENAME);
       if (fs.existsSync(statePath)) throw new Error(`A setup state already exists at ${statePath}; use setup --resume ${statePath}.`);
       state = setupInitialState(target, statePath, false);
@@ -1366,14 +1449,17 @@ async function setupCommand(positional, options) {
 
     currentStep = 'AUDIT';
     const runPath = state.artifacts.runPath
-      ? path.resolve(state.artifacts.runPath)
+      ? setupPathInsideRepository(target, state.artifacts.runPath, SETUP_RUN_FILENAME)
       : setupPathInsideRepository(target, undefined, SETUP_RUN_FILENAME);
     let run;
     let auditObservedStatus = 'EXECUTED';
+    setupPathInsideRepository(target, runPath, SETUP_RUN_FILENAME);
     if (fs.existsSync(runPath)) {
+      setupPathInsideRepository(target, runPath, SETUP_RUN_FILENAME);
       run = readJson(runPath);
       auditObservedStatus = 'REUSED_EXISTING';
     } else {
+      setupPathInsideRepository(target, runPath, SETUP_RUN_FILENAME);
       const scanArgs = [target, '--output', runPath];
       if (options.run !== undefined) scanArgs.push(options.run === true ? '--run' : `--run=${options.run}`);
       const scanCall = await setupInvoke(() => scanCommand([target], { output: runPath, run: options.run, emit: false }));
@@ -1388,13 +1474,16 @@ async function setupCommand(positional, options) {
 
     currentStep = 'REPORT';
     const reportPath = state.artifacts.reportPath
-      ? path.resolve(state.artifacts.reportPath)
+      ? setupPathInsideRepository(target, state.artifacts.reportPath, SETUP_REPORT_FILENAME)
       : setupPathInsideRepository(target, undefined, SETUP_REPORT_FILENAME);
     let reportResult;
+    setupPathInsideRepository(target, reportPath, SETUP_REPORT_FILENAME);
     if (fs.existsSync(reportPath)) {
+      setupPathInsideRepository(target, reportPath, SETUP_REPORT_FILENAME);
       reportResult = { command: 'report', status: 'REUSED_EXISTING', format: 'markdown', input: runPath, output: reportPath };
       setupCommandRecord(state, 'report', [runPath, '--format markdown', '--output', reportPath], 0, reportResult, 'REUSED');
     } else {
+      setupPathInsideRepository(target, reportPath, SETUP_REPORT_FILENAME);
       const reportCall = await setupInvoke(() => reportCommand([runPath], { format: 'markdown', output: reportPath, emit: false }));
       reportResult = reportCall.result;
       setupCommandRecord(state, 'report', [runPath, '--format markdown', '--output', reportPath], reportCall.exitCode, reportResult);
@@ -1413,6 +1502,19 @@ async function setupCommand(positional, options) {
     state.status = personalizationComplete && measured ? 'COMPLETE' : 'PARTIAL';
   } catch (error) {
     if (!state) {
+      if (/^Setup artifact path|^Setup artifact destination/.test(error.message)) {
+        const blocked = {
+          command: 'setup',
+          status: 'BLOCKED',
+          repository: confinementRoot ? { root: confinementRoot } : null,
+          diagnostic: error.message,
+          persisted: false,
+          humanAction: 'Choose a state or artifact path inside the physical analyzed repository and retry setup.',
+        };
+        process.stdout.write(`${JSON.stringify(blocked, null, 2)}\n`);
+        process.exitCode = 2;
+        return blocked;
+      }
       process.exitCode = previousExitCode;
       throw error;
     }
@@ -1425,6 +1527,7 @@ async function setupCommand(positional, options) {
   }
 
   state.updatedAt = new Date().toISOString();
+  state.statePath = setupPathInsideRepository(target, state.statePath, SETUP_STATE_FILENAME);
   setupStep(state, 'SUMMARY', 'COMPLETE', {
     status: state.status,
     files: state.files,
@@ -1432,7 +1535,7 @@ async function setupCommand(positional, options) {
     capabilities: state.capabilities,
   });
   setupFile(state, state.statePath, fs.existsSync(state.statePath) ? 'UPDATED' : 'CREATED', 'setup-state');
-  writeJsonAtomicReplace(state.statePath, state);
+  writeJsonAtomicReplace(state.statePath, state, target);
   process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
   process.exitCode = state.status === 'COMPLETE' ? 0 : 2;
   return state;

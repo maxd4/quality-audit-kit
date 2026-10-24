@@ -36,7 +36,11 @@
       },
       "additionalProperties": true
     },
-    "statePath": { "type": "string", "minLength": 1 },
+    "statePath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path recorded by the CLI. Physical containment and symlink policy are enforced at runtime, not by JSON Schema."
+    },
     "steps": {
       "type": "array",
       "items": {
@@ -76,7 +80,11 @@
         "additionalProperties": true
       }
     },
-    "artifacts": { "type": "object", "additionalProperties": { "type": "string" } },
+    "artifacts": {
+      "type": "object",
+      "description": "Recorded artifact paths. The CLI treats these values as untrusted and revalidates their physical containment before reuse or creation.",
+      "additionalProperties": { "type": "string" }
+    },
     "capabilities": {
       "type": "object",
       "required": ["activated", "unavailable", "unverified"],
