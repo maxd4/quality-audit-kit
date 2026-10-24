@@ -118,3 +118,40 @@ test('browser exporter records incompatible server versions without requesting f
   assert.equal(issueRequests, 0);
   assert.ok(exported.diagnostics.some((item) => item.code === 'INCOMPATIBLE_VERSION'));
 });
+
+test('browser exporter extracts the major version and refuses pre-9 or malformed versions before issue requests', async () => {
+  const exporter = loadExporter();
+  const location = { origin: 'https://sonar.example.invalid', href: 'https://sonar.example.invalid/project/overview?id=demo-project' };
+  const cases = [
+    { version: '8.9.10', status: 'INCOMPATIBLE', issueRequests: 0 },
+    { version: '7.9.6', status: 'INCOMPATIBLE', issueRequests: 0 },
+    { version: '9.9.0', status: 'MEASURED', issueRequests: 1 },
+    { version: '10.6.0.92116', status: 'MEASURED', issueRequests: 1 },
+    { version: '9.9.0-SNAPSHOT', status: 'MEASURED', issueRequests: 1 },
+    { version: 'not-a-version', status: 'INCOMPATIBLE', issueRequests: 0 },
+    { version: '', status: 'INCOMPATIBLE', issueRequests: 0 },
+  ];
+  for (const testCase of cases) {
+    const calls = [];
+    const exported = await exporter.collect({}, {
+      location,
+      fetch: async (url) => {
+        const parsed = new URL(url);
+        calls.push(parsed.pathname);
+        if (parsed.pathname === '/api/server/version') return response(testCase.version);
+        if (parsed.pathname === '/api/issues/search') return response(JSON.stringify({ paging: { total: 0, pageIndex: 1, pageSize: 500 }, issues: [] }));
+        if (parsed.pathname === '/api/project_analyses/search') return response(JSON.stringify({ analyses: [] }));
+        throw new Error(`unexpected endpoint ${parsed.pathname}`);
+      },
+    });
+    assert.equal(exported.status, testCase.status, testCase.version || '<empty>');
+    assert.equal(calls.filter((pathname) => pathname === '/api/issues/search').length, testCase.issueRequests, testCase.version || '<empty>');
+    assert.equal(exported.source.compatibility.status, testCase.status === 'INCOMPATIBLE' ? 'INCOMPATIBLE' : 'COMPATIBLE');
+    if (testCase.status === 'INCOMPATIBLE') {
+      assert.ok(exported.diagnostics.some((item) => item.code === 'INCOMPATIBLE_VERSION'));
+      assert.equal(exported.issues.pagination.pageCount, 0);
+    } else {
+      assert.equal(exported.source.apiProfile, testCase.version.startsWith('10.') ? 'web-api-v2-aware-v1-compatible' : 'web-api-v1-compatible');
+    }
+  }
+});

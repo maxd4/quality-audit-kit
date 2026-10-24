@@ -50,9 +50,10 @@
 
   function inspectVersion(version) {
     const value = String(version || '').trim();
-    const match = /^\d+(?:\.\d+)+(?:[-+].*)?$/.exec(value);
+    const match = /^(\d+)(?:\.\d+)+(?:[-+].*)?$/.exec(value);
     if (!match) return { status: 'INCOMPATIBLE', reason: 'The server version endpoint did not return a SonarQube version string.' };
     const major = Number(match[1]);
+    if (!Number.isSafeInteger(major)) return { status: 'INCOMPATIBLE', reason: 'The SonarQube server version major number could not be interpreted safely.' };
     if (major < 9) return { status: 'INCOMPATIBLE', reason: 'The browser exporter requires the Web API contract used by SonarQube 9 or newer.' };
     return { status: 'COMPATIBLE', profile: versionProfile(value) };
   }
