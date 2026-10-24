@@ -163,6 +163,97 @@ test('triage keeps human justification separate and never infers a security prio
   assert.equal(family.promptEligible, false);
 });
 
+function familyDecisionFindings() {
+  return [
+    fixtureFinding('f1', 'src/a.js', 1, 5, 'src/b.js', 10, 14, 'native-family'),
+    fixtureFinding('f2', 'src/a.js', 20, 24, 'src/c.js', 30, 34, 'native-family'),
+  ];
+}
+
+function humanDecision(findingId, decision, reason = `${decision} reason`, reviewer = `reviewer-${findingId}`) {
+  return { findingId, decision, reason, reviewer };
+}
+
+test('partial KEEP_JUSTIFIED remains scoped to one finding and keeps the other finding reviewable', () => {
+  const audit = buildCloneAudit(runWithFindings(familyDecisionFindings()), { decisions: [humanDecision('f1', 'KEEP_JUSTIFIED', 'Compatibility exception', 'alice')] });
+  const family = audit.families[0];
+  assert.equal(family.findingIds.length, 2);
+  assert.equal(family.decisionCoverage.status, 'PARTIAL');
+  assert.deepEqual(family.decisionCoverage.coveredFindingIds, ['f1']);
+  assert.deepEqual(family.decisionCoverage.missingFindingIds, ['f2']);
+  assert.equal(family.recommendation, 'REVIEW_FIRST');
+  assert.equal(family.priority, 'REVIEW_REQUIRED');
+  assert.equal(family.qualification.approvedDecision, null);
+  assert.deepEqual(family.qualification.decisions, [{ findingId: 'f1', action: 'KEEP_JUSTIFIED', reason: 'Compatibility exception', reviewer: 'alice' }]);
+  assert.equal(family.reviewPromptEligible, true);
+  assert.equal(audit.prompts.length, 1);
+  assert.match(audit.prompts[0].prompt, /f2/);
+  assert.match(audit.prompts[0].prompt, /Existing decisions apply only to their stated findings/);
+  assert.doesNotMatch(audit.prompts[0].prompt, /Proposed action: KEEP_JUSTIFIED/);
+  const markdown = renderCloneMarkdown(audit);
+  assert.match(markdown, /Decision coverage/);
+  assert.match(markdown, /PARTIAL/);
+  assert.match(JSON.stringify(audit), /Compatibility exception/);
+});
+
+test('partial FALSE_POSITIVE does not hide an unexamined family finding', () => {
+  const audit = buildCloneAudit(runWithFindings(familyDecisionFindings()), { decisions: [humanDecision('f1', 'FALSE_POSITIVE', 'Only the first pair is generated code', 'bob')] });
+  const family = audit.families[0];
+  assert.equal(family.decisionCoverage.status, 'PARTIAL');
+  assert.equal(family.recommendation, 'REVIEW_FIRST');
+  assert.equal(family.priority, 'REVIEW_REQUIRED');
+  assert.deepEqual(family.decisionCoverage.missingFindingIds, ['f2']);
+  assert.equal(family.reviewPromptEligible, true);
+});
+
+test('contradictory family decisions are explicit and independent of input order', () => {
+  const findings = familyDecisionFindings();
+  const decisions = [
+    humanDecision('f1', 'KEEP_JUSTIFIED', 'Pair one is required', 'alice'),
+    humanDecision('f2', 'FALSE_POSITIVE', 'Pair two is noise', 'bob'),
+  ];
+  const first = buildCloneAudit(runWithFindings(findings), { decisions });
+  const second = buildCloneAudit(runWithFindings(findings), { decisions: [...decisions].reverse() });
+  const left = first.families[0];
+  const right = second.families[0];
+  assert.deepEqual(left.decisionCoverage, right.decisionCoverage);
+  assert.equal(left.decisionCoverage.status, 'CONFLICT');
+  assert.equal(left.recommendation, 'REVIEW_FIRST');
+  assert.equal(left.priority, 'REVIEW_REQUIRED');
+  assert.equal(left.qualification.approvedDecision, null);
+  assert.deepEqual(left.qualification.decisions.map((decision) => decision.reviewer), ['alice', 'bob']);
+  assert.equal(left.reviewPromptEligible, true);
+});
+
+test('compatible decisions cover every finding before a family can be justified', () => {
+  const audit = buildCloneAudit(runWithFindings(familyDecisionFindings()), {
+    decisions: [
+      humanDecision('f2', 'KEEP_JUSTIFIED', 'Second pair is also required', 'bob'),
+      humanDecision('f1', 'KEEP_JUSTIFIED', 'First pair is required', 'alice'),
+    ],
+  });
+  const family = audit.families[0];
+  assert.equal(family.decisionCoverage.status, 'COMPLETE');
+  assert.deepEqual(family.decisionCoverage.coveredFindingIds, ['f1', 'f2']);
+  assert.equal(family.recommendation, 'KEEP_JUSTIFIED');
+  assert.equal(family.priority, 'P3');
+  assert.equal(family.promptEligible, false);
+  assert.equal(family.reviewPromptEligible, false);
+  assert.deepEqual(family.qualification.decisions.map((decision) => decision.findingId), ['f1', 'f2']);
+  assert.deepEqual(family.qualification.decisions.map((decision) => decision.reviewer), ['alice', 'bob']);
+});
+
+test('a decision outside a family has no effect on its decision coverage', () => {
+  const findings = [...familyDecisionFindings(), fixtureFinding('f3', 'src/x.js', 1, 3, 'src/y.js', 10, 12, 'other-family')];
+  const audit = buildCloneAudit(runWithFindings(findings), { decisions: [humanDecision('f3', 'KEEP_JUSTIFIED', 'Only the other family is accepted', 'carol')] });
+  const family = audit.families.find((item) => item.findingIds.includes('f1'));
+  assert.equal(family.decisionCoverage.status, 'NONE');
+  assert.deepEqual(family.decisionCoverage.coveredFindingIds, []);
+  assert.deepEqual(family.decisionCoverage.missingFindingIds, ['f1', 'f2']);
+  assert.equal(family.recommendation, 'REVIEW_FIRST');
+  assert.equal(family.priority, 'REVIEW_REQUIRED');
+});
+
 test('legacy runs and missing scanner measurements remain explicit insufficiency', () => {
   const audit = buildCloneAudit(runWithFindings([]));
   assert.equal(audit.status, 'INSUFFICIENT_DATA');

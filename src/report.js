@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const { buildCloneAudit, renderCloneMarkdown } = require('./clone-triage');
+const { renderMaintainabilityTrendsMarkdown, renderMaintainabilityTrendsTerminal } = require('./trends');
 
 const SHA_PATTERN = /^[a-f0-9]{40}$/i;
 const MEASUREMENT_STATUSES = new Set(['MEASURED', 'PARTIAL', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY']);
@@ -182,7 +183,7 @@ function buildStructuralComplexity(measurements) {
     .sort((left, right) => left.path.localeCompare(right.path) || left.startLine - right.startLine || left.functionId.localeCompare(right.functionId));
 }
 
-function buildStructuredReport(inputRun) {
+function buildStructuredReport(inputRun, options = {}) {
   validateRun(inputRun);
   const run = sanitizeForExport(inputRun);
   const buckets = findingBuckets(run);
@@ -205,6 +206,7 @@ function buildStructuredReport(inputRun) {
   });
   const failures = measurements.filter((measurement) => measurement.validationState !== 'VALIDATED' || measurement.measurementStatus !== 'MEASURED');
   const structuralComplexity = buildStructuralComplexity(run.functionMeasurements);
+  const maintainabilityTrends = options.maintainabilityTrends ? sanitizeForExport(options.maintainabilityTrends) : null;
   return {
     schemaVersion: '0.1-draft',
     reportVersion: '0.1-draft',
@@ -216,6 +218,7 @@ function buildStructuredReport(inputRun) {
     ...(Array.isArray(run.functionMeasurements) ? { functionMeasurements: run.functionMeasurements } : {}),
     ...(run.maintainabilityCoverage ? { maintainabilityCoverage: run.maintainabilityCoverage } : {}),
     structuralComplexity,
+    ...(maintainabilityTrends ? { maintainabilityTrends } : {}),
     clones,
     measurementFailures: failures,
     recommendations: buildRecommendations(run, buckets, failures),
@@ -236,8 +239,8 @@ function findingTable(title, findings) {
   return lines;
 }
 
-function renderMarkdown(run) {
-  const report = buildStructuredReport(run);
+function renderMarkdown(run, options = {}) {
+  const report = buildStructuredReport(run, options);
   const safeRun = sanitizeForExport(run);
   const discovery = safeRun.discovery || { packageManager: { name: null }, languages: [], workspaces: { packages: [] }, configurations: [] };
   const lines = [
@@ -272,6 +275,7 @@ function renderMarkdown(run) {
     lines.push('');
   }
   if (safeRun.comparison) lines.push('## Historical comparison', '', `- Status: \`${cell(safeRun.comparison.status)}\``, `- Baseline run: \`${cell(safeRun.comparison.baselineRunId || 'UNKNOWN')}\``, `- Resolved: ${report.findings.resolved.length}`, '');
+  if (report.maintainabilityTrends) lines.push(...renderMaintainabilityTrendsMarkdown(report.maintainabilityTrends, { title: '## Maintainability trends' }).trimEnd().split('\n'), '');
   lines.push('## Findings', '');
   lines.push(...findingTable('New', report.findings.new));
   lines.push(...findingTable('Historical actionable', report.findings.historicalActionable));
@@ -288,8 +292,8 @@ function renderMarkdown(run) {
   return `${lines.join('\n')}\n`;
 }
 
-function renderTerminal(run) {
-  const report = buildStructuredReport(run);
+function renderTerminal(run, options = {}) {
+  const report = buildStructuredReport(run, options);
   const safeRun = sanitizeForExport(run);
   const lines = ['Quality Audit Kit report', `Repository: ${safeRun.repository.name}`, `Run: ${safeRun.runId}`, `Scope: ${safeRun.inputScope}`, `Context SHA: ${safeRun.repository.contextCommitSha || safeRun.repository.commitSha || 'UNKNOWN'}`, 'No global quality score is computed.', '', 'Measurement status', '------------------', 'Run | Engine | Version | Scope | SHA | Validation | Status | Source revision'];
   for (const measurement of report.measurements) lines.push(`${measurement.runId} | ${measurement.engine} | ${measurement.version} | ${measurement.scope} | ${measurement.sha || 'UNKNOWN'} | ${measurement.validationState} | ${measurement.measurementStatus} | ${measurement.sourceRevision.status}`);
@@ -298,6 +302,7 @@ function renderTerminal(run) {
   if (report.maintainabilityCoverage) lines.push('', 'Function maintainability', '------------------------', `Coverage: ${report.maintainabilityCoverage.status}`, `Eligible files: ${report.maintainabilityCoverage.eligibleFiles?.length || 0}`, `Measured files: ${report.maintainabilityCoverage.measuredFiles?.length || 0}`, `Excluded files: ${report.maintainabilityCoverage.excludedFiles?.length || 0}`, `Unsupported files: ${report.maintainabilityCoverage.unsupportedFiles?.length || 0}`, `Error files: ${report.maintainabilityCoverage.errorFiles?.length || 0}`, `Functions measured: ${report.maintainabilityCoverage.functionsMeasured || 0}`, `Function measurements: ${report.functionMeasurements?.length || 0}`);
   lines.push('', 'Structural complexity', '---------------------', `Functions with multiple signals: ${report.structuralComplexity.length}`);
   for (const item of report.structuralComplexity) lines.push(`${item.path}:${item.startLine}-${item.endLine} | ${item.functionName} | ${item.explanation}`);
+  if (report.maintainabilityTrends) lines.push('', renderMaintainabilityTrendsTerminal(report.maintainabilityTrends).trimEnd());
   lines.push('', 'Clone audit', '-----------', `Status: ${report.clones.status}`, `Families: ${report.clones.counts.families}`, `Unique occurrences: ${report.clones.counts.occurrences}`, `Unique pairs: ${report.clones.counts.pairs}`);
   const listed = [...report.findings.new, ...report.findings.historicalActionable, ...report.findings.historicalJustified, ...report.findings.reintroduced, ...report.findings.unclassified];
   if (listed.length) { lines.push('', 'ID | Engine | Rule | File | Severity | Lifecycle'); for (const finding of listed) lines.push(`${finding.id} | ${finding.engine} | ${finding.ruleId} | ${finding.path} | ${finding.severity} | ${finding.lifecycle}`); }

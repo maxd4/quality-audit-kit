@@ -162,6 +162,24 @@
         }
       }
     },
+    "maintainabilityTrends": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["schemaVersion", "trendType", "status", "previousRunId", "currentRunId", "contract", "functions", "nonComparableFunctions", "addedFunctions", "removedFunctions", "summary"],
+      "properties": {
+        "schemaVersion": { "const": "0.1-draft" },
+        "trendType": { "const": "MAINTAINABILITY_TRENDS" },
+        "status": { "enum": ["COMPARABLE", "NOT_COMPARABLE"] },
+        "previousRunId": { "type": ["string", "null"] },
+        "currentRunId": { "type": ["string", "null"] },
+        "contract": { "type": "object", "additionalProperties": true },
+        "functions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "nonComparableFunctions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "addedFunctions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "removedFunctions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "summary": { "type": "object", "additionalProperties": true }
+      }
+    },
     "findings": {
       "type": "object",
       "additionalProperties": false,
@@ -180,6 +198,7 @@
     "recommendations": { "type": "array", "items": { "type": "string" } },
     "diagnostics": { "type": "array", "items": { "type": "object" } },
     "comparison": { "type": "object" },
+    "maintainabilityTrends": { "$ref": "#/$defs/maintainabilityTrends" },
     "qualityGate": { "type": "object" }
   }
 }

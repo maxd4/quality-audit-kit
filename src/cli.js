@@ -28,6 +28,7 @@ const { executeFix, runValidations, verifyFixResult } = require('./fix');
 const { buildSarif, importSarifFile } = require('./sarif');
 const { connectSonar, importSonar, importSonarExport } = require('./sonar');
 const { buildCloneAudit, renderCloneMarkdown } = require('./clone-triage');
+const { compareMaintainabilityRuns, renderMaintainabilityTrendsMarkdown, renderMaintainabilityTrendsTerminal } = require('./trends');
 const {
   ENGINE_NAME: MAINTAINABILITY_ENGINE,
   ENGINE_VERSION: MAINTAINABILITY_ENGINE_VERSION,
@@ -1137,6 +1138,10 @@ function reportCommand(positional, options) {
   if (!inputPath) throw new Error('report requires a run JSON path.');
   const resolvedInput = path.resolve(process.cwd(), inputPath);
   const run = readJson(resolvedInput);
+  const previousRunPath = options['previous-run'] || options.previous;
+  const maintainabilityTrends = previousRunPath
+    ? compareMaintainabilityRuns(readJson(path.resolve(process.cwd(), String(previousRunPath))), run)
+    : null;
   const format = options.format || 'terminal';
   if (!['terminal', 'markdown', 'json', 'sarif', 'zip'].includes(format)) throw new Error(`Unsupported report format: ${format}`);
   const bundlePath = options.bundle ? path.resolve(process.cwd(), options.bundle) : (format === 'zip' && options.output ? path.resolve(process.cwd(), options.output) : null);
@@ -1147,13 +1152,29 @@ function reportCommand(positional, options) {
     return { command: 'report', status: 'WRITTEN', format, input: resolvedInput, output: bundlePath };
   }
   const content = format === 'json'
-    ? `${JSON.stringify(buildStructuredReport(run), null, 2)}\n`
+    ? `${JSON.stringify(buildStructuredReport(run, { maintainabilityTrends }), null, 2)}\n`
     : format === 'sarif' ? `${JSON.stringify(buildSarif(run), null, 2)}\n`
-    : format === 'markdown' ? renderMarkdown(run) : renderTerminal(run);
+    : format === 'markdown' ? renderMarkdown(run, { maintainabilityTrends }) : renderTerminal(run, { maintainabilityTrends });
   const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
   if (outputPath) writeOutput(outputPath, content);
   else if (options.emit !== false) process.stdout.write(content);
   return { command: 'report', status: outputPath ? 'WRITTEN' : 'EMITTED', format, input: resolvedInput, output: outputPath };
+}
+
+function trendsCommand(positional, options) {
+  if (positional.length < 2) throw new Error('trends requires previous-run.json and current-run.json paths.');
+  const previousPath = path.resolve(process.cwd(), positional[0]);
+  const currentPath = path.resolve(process.cwd(), positional[1]);
+  const trends = compareMaintainabilityRuns(readJson(previousPath), readJson(currentPath));
+  const format = options.format || 'terminal';
+  if (!['terminal', 'markdown', 'json'].includes(format)) throw new Error(`Unsupported trends format: ${format}`);
+  const content = format === 'json'
+    ? `${JSON.stringify(trends, null, 2)}\n`
+    : format === 'markdown' ? renderMaintainabilityTrendsMarkdown(trends) : renderMaintainabilityTrendsTerminal(trends);
+  const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
+  if (outputPath) writeOutput(outputPath, content);
+  else process.stdout.write(content);
+  return trends;
 }
 
 const SETUP_STEP_IDS = ['DISCOVERY', 'INITIALIZATION', 'PERSONALIZATION', 'AUDIT', 'REPORT', 'SUMMARY'];
@@ -1564,6 +1585,7 @@ const COMMAND_HELP = {
   fix: 'quality-audit-kit fix --next [plan.json] [--output fix-result.json]\nquality-audit-kit fix --next [plan.json] --execute --approve --agent deterministic\n  Preview is read-only. Execution is bounded and requires explicit approval.',
   verify: 'quality-audit-kit verify fix-result.json [--output verification.json]\n  Verifies recorded evidence only; it never executes an agent.',
   clones: 'quality-audit-kit clones run.json [--format json|markdown] [--output clones.json] [--export prompts]\n  Regroups existing jscpd findings without rerunning a scanner or changing source code.',
+  trends: 'quality-audit-kit trends previous-run.json current-run.json [--format terminal|markdown|json] [--output trends.json]\n  Compares compatible function maintainability measurements offline; it never reruns scanners or changes findings, gates or baselines.',
 };
 
 function printCompactHelp(command) {
@@ -1623,6 +1645,7 @@ async function main(argv) {
   if (command === 'import') return importCommand(positional, options);
   if (command === 'report') return reportCommand(positional, options);
   if (command === 'clones') return clonesCommand(positional, options);
+  if (command === 'trends') return trendsCommand(positional, options);
   if (command === 'thresholds') return thresholdsCommand(positional, options);
   throw new Error(`Unknown command: ${command}. Use --help for usage.`);
 }

@@ -121,10 +121,48 @@ function overlapCount(occurrences) {
   return count;
 }
 
-function decisionForFamily(decisions, findingIds) {
+function decisionAction(decision) {
+  return decision?.action || decision?.decision || null;
+}
+
+function compareDecisions(left, right) {
+  return left.findingId.localeCompare(right.findingId)
+    || left.action.localeCompare(right.action)
+    || left.reason.localeCompare(right.reason)
+    || left.reviewer.localeCompare(right.reviewer);
+}
+
+function decisionCoverage(decisions, findingIds) {
   const records = Array.isArray(decisions) ? decisions : decisions?.decisions;
-  if (!Array.isArray(records)) return null;
-  return records.find((decision) => findingIds.includes(decision.findingId) && (decision.action || decision.decision) && decision.reason && decision.reviewer) || null;
+  const byFinding = new Map();
+  for (const decision of Array.isArray(records) ? records : []) {
+    if (!findingIds.includes(decision?.findingId) || !decisionAction(decision) || !decision.reason || !decision.reviewer) continue;
+    const normalized = {
+      findingId: String(decision.findingId),
+      action: decisionAction(decision),
+      reason: String(decision.reason),
+      reviewer: String(decision.reviewer),
+    };
+    if (!byFinding.has(normalized.findingId)) byFinding.set(normalized.findingId, []);
+    byFinding.get(normalized.findingId).push(normalized);
+  }
+  const covered = findingIds.filter((findingId) => byFinding.has(findingId)).sort();
+  const missing = findingIds.filter((findingId) => !byFinding.has(findingId)).sort();
+  const decisionHistory = [...byFinding.values()].flat().sort(compareDecisions);
+  const selected = covered.map((findingId) => [...byFinding.get(findingId)].sort(compareDecisions).at(-1)).sort(compareDecisions);
+  const actions = [...new Set(decisionHistory.map((decision) => decision.action))].sort();
+  const conflictingFindingIds = covered.filter((findingId) => new Set(byFinding.get(findingId).map((decision) => decision.action)).size > 1);
+  const status = !selected.length ? 'NONE' : actions.length > 1 ? 'CONFLICT' : missing.length ? 'PARTIAL' : 'COMPLETE';
+  return {
+    status,
+    findingIds: [...findingIds].sort(),
+    coveredFindingIds: covered,
+    missingFindingIds: missing,
+    actions,
+    conflictingFindingIds,
+    decisions: selected,
+    decisionHistory,
+  };
 }
 
 function categoryFromAnnotation(annotation) {
@@ -136,8 +174,9 @@ function categoryFromAnnotation(annotation) {
   };
 }
 
-function recommendationFor(category, decision) {
-  const action = decision?.action || decision?.decision;
+function recommendationFor(category, decision, coverage) {
+  if (coverage?.status === 'PARTIAL' || coverage?.status === 'CONFLICT') return 'REVIEW_FIRST';
+  const action = decisionAction(decision);
   if (action === 'KEEP_JUSTIFIED') return 'KEEP_JUSTIFIED';
   if (action === 'FALSE_POSITIVE') return 'NO_ACTION_NOISE';
   if (category === 'DUPLICATED_BUSINESS_LOGIC') return 'CENTRALIZE_OWNER';
@@ -149,8 +188,9 @@ function recommendationFor(category, decision) {
   return 'REVIEW_FIRST';
 }
 
-function priorityFor(family, category, decision) {
-  const action = decision?.action || decision?.decision;
+function priorityFor(family, category, decision, coverage) {
+  if (coverage?.status === 'PARTIAL' || coverage?.status === 'CONFLICT') return 'REVIEW_REQUIRED';
+  const action = decisionAction(decision);
   if (action === 'KEEP_JUSTIFIED' || action === 'FALSE_POSITIVE') return 'P3';
   if (category === 'REVIEW_REQUIRED') return 'REVIEW_REQUIRED';
   const explicitSecurity = family.relatedFindings.some((finding) => finding.planning?.securityConfirmed === true || finding.severity === 'CRITICAL');
@@ -175,15 +215,16 @@ function buildFamily(group, decisions, annotations) {
   const occurrences = uniqueOccurrences(findings);
   const pairs = uniquePairs(findings);
   const files = [...new Set(occurrences.map((occurrence) => occurrence.path).filter(Boolean))].sort();
-  const coverage = lineCoverage(occurrences);
+  const lineCoverageResult = lineCoverage(occurrences);
   const completeRanges = occurrences.length > 0 && occurrences.every(validRange);
   const dataAvailability = completeRanges && findings.every((finding) => finding.clone.dataAvailability === 'COMPLETE') ? 'COMPLETE' : occurrences.length ? 'PARTIAL' : 'INSUFFICIENT';
   const relatedFindings = [...new Map(group.allFindings.filter((finding) => finding.engine !== 'jscpd' && files.includes(finding.path)).map((finding) => [finding.id, finding])).values()];
   const familyId = `clone-family:${hash(JSON.stringify({ grouping: group.grouping, scope: group.scope, provenance: group.provenance })).slice(0, 32)}`;
   const annotation = categoryFromAnnotation(annotations?.[familyId]);
-  const decision = decisionForFamily(decisions, findingIds);
+  const decisionState = decisionCoverage(decisions, findingIds);
+  const decision = decisionState.status === 'COMPLETE' ? decisionState.decisions[0] : null;
   const category = annotation?.category || 'REVIEW_REQUIRED';
-  const recommendation = recommendationFor(category, decision);
+  const recommendation = recommendationFor(category, decision, decisionState);
   const family = {
     id: familyId,
     grouping: group.grouping,
@@ -196,9 +237,10 @@ function buildFamily(group, decisions, annotations) {
     files,
     occurrences,
     pairs,
-    lineCoverage: { status: completeRanges ? 'MEASURED' : 'NOT_ESTIMABLE', unionLines: completeRanges ? coverage.coveredLines : null, byFile: coverage.files },
+    lineCoverage: { status: completeRanges ? 'MEASURED' : 'NOT_ESTIMABLE', unionLines: completeRanges ? lineCoverageResult.coveredLines : null, byFile: lineCoverageResult.files },
     overlapCount: overlapCount(occurrences),
     dataAvailability,
+    decisionCoverage: decisionState,
     metrics: {
       reportedLines: [...new Set(findings.map((finding) => finding.clone.metrics?.lines).filter((value) => Number.isFinite(value)))],
       reportedPercentages: [...new Set(findings.map((finding) => finding.clone.metrics?.percentage).filter((value) => Number.isFinite(value)))],
@@ -213,7 +255,9 @@ function buildFamily(group, decisions, annotations) {
     observations: ['The family is grouped from native jscpd identity or explicit derived pair characteristics.'],
     hypotheses: [],
     conclusions: [],
-    approvedDecision: decision ? { action: decision.action || decision.decision, reason: decision.reason, reviewer: decision.reviewer } : null,
+    approvedDecision: decision ? { action: decision.action, reason: decision.reason, reviewer: decision.reviewer } : null,
+    decisions: decisionState.decisions,
+    decisionCoverage: decisionState,
   };
   family.benefit = {
     diffusion: family.distinctFiles > 0 ? family.distinctFiles : 'NOT_ESTIMABLE',
@@ -223,11 +267,12 @@ function buildFamily(group, decisions, annotations) {
     mutualizationPotential: 'NOT_ESTIMABLE',
     confidence: 'LOW',
   };
-  family.priority = priorityFor(family, category, decision);
+  family.priority = priorityFor(family, category, decision, decisionState);
   family.prudence = prudenceFor(family);
   family.effort = effortFor(family);
   family.recommendation = recommendation;
   family.promptEligible = ACTIONABLE.has(recommendation) && category !== 'REVIEW_REQUIRED';
+  family.reviewPromptEligible = decisionState.status === 'PARTIAL' || decisionState.status === 'CONFLICT';
   return family;
 }
 
@@ -252,10 +297,12 @@ function buildCloneAudit(run, options = {}) {
   const decisions = options.decisions || run?.decisions || [];
   const annotations = options.annotations || run?.cloneAnnotations || {};
   const families = [...groups.values()].map((group) => buildFamily(group, decisions, annotations)).sort((left, right) => left.id.localeCompare(right.id));
-  const prompts = families.filter((family) => family.promptEligible).map((family) => ({
+  const prompts = families.filter((family) => family.promptEligible || family.reviewPromptEligible).map((family) => ({
     familyId: family.id,
     fileName: `${family.id.replace(/[^a-z0-9-]+/gi, '-')}.md`,
-    prompt: `Review clone family ${family.id}. Evidence: ${family.qualification.evidence} Files: ${family.files.join(', ')}. Proposed action: ${family.recommendation}. Do not modify code until a human confirms ownership, behavior and tests.`,
+    prompt: family.reviewPromptEligible
+      ? `Review clone family ${family.id}. Decision coverage is ${family.decisionCoverage.status}; covered findings: ${family.decisionCoverage.coveredFindingIds.join(', ') || 'none'}; findings still requiring an independent decision: ${family.decisionCoverage.missingFindingIds.join(', ') || 'none'}. Existing decisions apply only to their stated findings. Evidence: ${family.qualification.evidence} Files: ${family.files.join(', ')}. Do not modify code or treat the family as justified until a human confirms each finding's scope, ownership, behavior and tests.`
+      : `Review clone family ${family.id}. Evidence: ${family.qualification.evidence} Files: ${family.files.join(', ')}. Proposed action: ${family.recommendation}. Do not modify code until a human confirms ownership, behavior and tests.`,
   }));
   return {
     schemaVersion: '0.1-draft',
@@ -275,7 +322,7 @@ function buildCloneAudit(run, options = {}) {
       history: run?.history ? 'RECORDED' : 'NOT_RECORDED',
       decisions: decisions.length ? 'SUPPLIED' : 'NOT_SUPPLIED',
     },
-    counts: { families: families.length, occurrences: families.reduce((sum, family) => sum + family.uniqueOccurrenceCount, 0), pairs: families.reduce((sum, family) => sum + family.pairCount, 0), actionable: prompts.length, incomplete: families.filter((family) => family.dataAvailability !== 'COMPLETE').length },
+    counts: { families: families.length, occurrences: families.reduce((sum, family) => sum + family.uniqueOccurrenceCount, 0), pairs: families.reduce((sum, family) => sum + family.pairCount, 0), actionable: families.filter((family) => family.promptEligible).length, reviewPrompts: families.filter((family) => family.reviewPromptEligible).length, prompts: prompts.length, incomplete: families.filter((family) => family.dataAvailability !== 'COMPLETE').length },
     diagnostics,
     families,
     prompts,
@@ -284,7 +331,7 @@ function buildCloneAudit(run, options = {}) {
 }
 
 function familyLine(family) {
-  return `| ${family.id} | ${family.category || family.qualification.category} | ${family.scope} | ${family.distinctFiles} | ${family.uniqueOccurrenceCount} | ${family.pairCount} | ${family.recommendation} | ${family.dataAvailability} |`;
+  return `| ${family.id} | ${family.category || family.qualification.category} | ${family.scope} | ${family.distinctFiles} | ${family.uniqueOccurrenceCount} | ${family.pairCount} | ${family.recommendation} | ${family.dataAvailability} | ${family.decisionCoverage.status} |`;
 }
 
 function renderCloneMarkdown(audit, options = {}) {
@@ -297,12 +344,12 @@ function renderCloneMarkdown(audit, options = {}) {
   };
   const lines = [options.title || '# Clone audit', '', `- Status: \`${audit?.status || 'UNKNOWN'}\``, `- Families: ${audit?.counts?.families || 0}`, `- Unique occurrences: ${audit?.counts?.occurrences || 0}`, `- Unique pairs: ${audit?.counts?.pairs || 0}`, '', 'jscpd similarity is not semantic proof and no gain is estimated without evidence.', ''];
   for (const [letter, title] of [['A', 'Corrections à fort potentiel'], ['B', 'Revue renforcée'], ['C', 'Intentionnels/non actionnables'], ['D', 'Données insuffisantes']]) {
-    lines.push(`## ${letter}. ${title}`, '', '| Family | Category | Scope | Files | Occurrences | Pairs | Recommendation | Data |', '| --- | --- | --- | ---: | ---: | ---: | --- | --- |');
+    lines.push(`## ${letter}. ${title}`, '', '| Family | Category | Scope | Files | Occurrences | Pairs | Recommendation | Data | Decision coverage |', '| --- | --- | --- | ---: | ---: | ---: | --- | --- | --- |');
     if (!groups[letter].length) lines.push('None recorded.');
     else for (const family of groups[letter]) lines.push(familyLine(family));
     lines.push('');
   }
-  lines.push('## E. Synthèse complète', '', ...families.map((family) => `- **${family.id}**: ${family.qualification.category}; ${family.scope}; ${family.uniqueOccurrenceCount} occurrences; coverage=${family.lineCoverage.unionLines ?? 'NOT_ESTIMABLE'}; priority=${family.priority}; prudence=${family.prudence}; effort=${family.effort}.`));
+  lines.push('## E. Synthèse complète', '', ...families.map((family) => `- **${family.id}**: ${family.qualification.category}; ${family.scope}; ${family.uniqueOccurrenceCount} occurrences; coverage=${family.lineCoverage.unionLines ?? 'NOT_ESTIMABLE'}; priority=${family.priority}; prudence=${family.prudence}; effort=${family.effort}; decision coverage=${family.decisionCoverage.status}; covered=${family.decisionCoverage.coveredFindingIds.join(', ') || 'none'}; pending=${family.decisionCoverage.missingFindingIds.join(', ') || 'none'}.`));
   if (!families.length) lines.push('None recorded.');
   if (audit?.diagnostics?.length) lines.push('', '### Diagnostics', '', ...audit.diagnostics.map((diagnostic) => `- **${diagnostic.code}**: ${diagnostic.message}`));
   lines.push('', 'No automatic agent or source-code change is produced by this audit.', '');
