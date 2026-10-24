@@ -295,15 +295,68 @@ function forbiddenValidationEffect(script) {
   return match ? match[1] : null;
 }
 
+const SUPPORTED_VALIDATION_MANAGER = 'npm';
+const UNSUPPORTED_VALIDATION_MANAGERS = new Set(['pnpm', 'yarn', 'bun']);
+
+function parseDeclaredPackageManager(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  const match = /^([a-z][a-z0-9._-]*)(?:@.+)?$/.exec(raw);
+  return match ? match[1] : 'unknown';
+}
+
+function validationPackageManagerDetection(root, packageJson) {
+  const declaredValue = packageJson?.packageManager;
+  if (declaredValue !== undefined && declaredValue !== null) {
+    const declared = parseDeclaredPackageManager(declaredValue);
+    if (declared !== SUPPORTED_VALIDATION_MANAGER && !UNSUPPORTED_VALIDATION_MANAGERS.has(declared)) {
+      return { name: declared, source: 'PACKAGE_MANAGER', status: 'UNKNOWN_EXPLICIT', supported: false };
+    }
+    const conflictingLockfile = [...UNSUPPORTED_VALIDATION_MANAGERS]
+      .map((name) => ({ name, file: name === 'bun' ? (fs.existsSync(path.join(root, 'bun.lock')) ? 'bun.lock' : 'bun.lockb') : name === 'pnpm' ? 'pnpm-lock.yaml' : 'yarn.lock' }))
+      .find(({ name, file }) => name !== declared && fs.existsSync(path.join(root, file)));
+    if (declared === SUPPORTED_VALIDATION_MANAGER && conflictingLockfile) {
+      return {
+        name: conflictingLockfile.name,
+        source: 'CONFLICTING_SIGNALS',
+        status: 'CONFLICTING',
+        supported: false,
+        declared,
+        lockfile: conflictingLockfile.file,
+      };
+    }
+    return {
+      name: declared,
+      source: 'PACKAGE_MANAGER',
+      status: declared === SUPPORTED_VALIDATION_MANAGER ? 'SUPPORTED_EXPLICIT' : 'UNSUPPORTED_EXPLICIT',
+      supported: declared === SUPPORTED_VALIDATION_MANAGER,
+    };
+  }
+
+  const lockfiles = [
+    ['bun', 'bun.lock'],
+    ['bun', 'bun.lockb'],
+    ['pnpm', 'pnpm-lock.yaml'],
+    ['yarn', 'yarn.lock'],
+  ].filter(([, file]) => fs.existsSync(path.join(root, file)));
+  if (lockfiles.length) {
+    const [name, file] = lockfiles[0];
+    return {
+      name,
+      source: 'LOCKFILE',
+      status: 'UNSUPPORTED_LOCKFILE',
+      supported: false,
+      lockfile: file,
+      conflictingLockfiles: lockfiles.slice(1).map(([, lockfile]) => lockfile),
+    };
+  }
+  if (fs.existsSync(path.join(root, 'package-lock.json')) || fs.existsSync(path.join(root, 'npm-shrinkwrap.json'))) {
+    return { name: SUPPORTED_VALIDATION_MANAGER, source: 'LOCKFILE', status: 'SUPPORTED_LOCKFILE', supported: true };
+  }
+  return { name: SUPPORTED_VALIDATION_MANAGER, source: 'DEFAULT', status: 'SUPPORTED_DEFAULT', supported: true };
+}
+
 function validationPackageManager(root, packageJson) {
-  if (fs.existsSync(path.join(root, 'pnpm-lock.yaml'))) return 'pnpm';
-  if (fs.existsSync(path.join(root, 'yarn.lock'))) return 'yarn';
-  if (fs.existsSync(path.join(root, 'bun.lockb'))) return 'bun';
-  const declared = String(packageJson?.packageManager || '').toLowerCase();
-  if (declared.startsWith('pnpm@')) return 'pnpm';
-  if (declared.startsWith('yarn@')) return 'yarn';
-  if (declared.startsWith('bun@')) return 'bun';
-  return 'npm';
+  return validationPackageManagerDetection(root, packageJson).name;
 }
 
 function validationHooks(scripts, name) {
@@ -367,9 +420,10 @@ function runValidations(root, options = {}) {
     invalidDeclarations: declarations.map((item) => ({ name: item.name, scriptSha256: item.scriptSha256, forbiddenEffect: item.forbiddenEffect || null })),
     reason: 'Each validation must declare the exact script hash and bounded effects (repository read, no writes, no network, declared subprocesses).',
   };
-  const packageManager = validationPackageManager(root, metadata.packageJson);
+  const packageManagerDetection = validationPackageManagerDetection(root, metadata.packageJson);
+  const packageManager = packageManagerDetection.name;
   const hooks = declarations.map((item) => ({ name: item.name, hooks: validationHooks(metadata.scripts, item.name) }));
-  if (packageManager !== 'npm') return {
+  if (!packageManagerDetection.supported) return {
     status: 'BLOCKED',
     validations: [],
     candidates: names,
@@ -378,12 +432,17 @@ function runValidations(root, options = {}) {
     effectBoundary: 'NOT_EXECUTED',
     executionScope: {
       packageManager,
+      packageManagerDetection,
       explicitScripts: authorizedNames,
       implicitHooks: 'NOT_PROVEN_SUPPRESSED',
       hooks,
       externalEffects: 'NOT_OBSERVABLE',
     },
-    reason: `Validation is blocked: hook suppression is not proven for ${packageManager}.`,
+    reason: packageManagerDetection.status === 'UNKNOWN_EXPLICIT'
+      ? 'Validation is blocked: packageManager explicitly declares an unknown manager; npm fallback is forbidden.'
+      : packageManagerDetection.status === 'CONFLICTING'
+        ? 'Validation is blocked: package manager declarations and lockfiles conflict; no manager fallback is permitted.'
+        : `Validation is blocked: hook suppression is not proven for ${packageManager}.`,
   };
   const validations = [];
   for (const item of declarations) {
@@ -404,6 +463,7 @@ function runValidations(root, options = {}) {
       declaredEffects: item.declaration.effects,
       executionScope: {
         packageManager: manager,
+        packageManagerDetection,
         explicitScript: name,
         implicitHooks: 'SUPPRESSED_BY_IGNORE_SCRIPTS',
         suppressedHooks: hookInfo?.hooks || [],
@@ -421,6 +481,7 @@ function runValidations(root, options = {}) {
     authorization: { required: true, received: true, names: authorizedNames },
     executionScope: {
       packageManager,
+      packageManagerDetection,
       explicitScripts: authorizedNames,
       implicitHooks: 'SUPPRESSED_BY_IGNORE_SCRIPTS',
       hooks,
@@ -537,4 +598,4 @@ function verifyFixResult(result) {
   return { command: 'verify', status: result.status === 'RESOLVED' ? 'UNVERIFIED' : result.status, verified: false, reason: 'The recorded evidence is insufficient to prove a resolved correction.' };
 }
 
-module.exports = { FIX_STATUSES, boundedPrompt, classifyExecution, compareSnapshots, executeFix, gitSnapshot, previewFix, reanalyzeLot, runValidations, validateLot, verifyFixResult };
+module.exports = { FIX_STATUSES, boundedPrompt, classifyExecution, compareSnapshots, executeFix, gitSnapshot, previewFix, reanalyzeLot, runValidations, validateLot, validationPackageManager, validationPackageManagerDetection, verifyFixResult };

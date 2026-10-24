@@ -60,6 +60,26 @@ function initializeGit(repository) {
   assert.equal(commit.status, 0, commit.stderr);
 }
 
+function configureValidation(repository, script, packageManager) {
+  const packagePath = path.join(repository, 'package.json');
+  const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+  packageJson.scripts.test = script;
+  if (packageManager === undefined) delete packageJson.packageManager;
+  else packageJson.packageManager = packageManager;
+  const scriptHash = crypto.createHash('sha256').update(script).digest('hex');
+  packageJson.qualityAuditKit = {
+    validationPolicy: {
+      scripts: {
+        test: {
+          scriptSha256: scriptHash,
+          effects: { read: 'repository', write: 'none', network: 'none', external: 'none', subprocesses: 'declared-only' },
+        },
+      },
+    },
+  };
+  fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+}
+
 function measuredRevision(seed, status = 'VERIFIED') {
   return {
     status,
@@ -1598,6 +1618,60 @@ test('fix validations suppress npm pre/post hooks and fail closed for unproven m
     try { fs.rmSync(preOutside, { force: true }); } catch { /* cleanup only */ }
     try { fs.rmSync(postOutside, { force: true }); } catch { /* cleanup only */ }
     cleanup(repository);
+  }
+});
+
+test('fix validation manager detection fails closed for Bun and unknown managers without running npm', () => {
+  const witness = 'validation-manager-witness.txt';
+  const witnessScript = `node -e "require('fs')['write' + 'FileSync']('${witness}', 'ran')"`;
+  const cases = [
+    { name: 'bun lock', expectedManager: 'bun', setup: (repository) => fs.writeFileSync(path.join(repository, 'bun.lock'), '# bun lock\n') },
+    { name: 'bun lockb', expectedManager: 'bun', setup: (repository) => fs.writeFileSync(path.join(repository, 'bun.lockb'), Buffer.from([0x42, 0x55, 0x4e])) },
+    { name: 'declared bun', expectedManager: 'bun', packageManager: 'bun@1.2.0' },
+    { name: 'declared unknown', expectedManager: 'deno', packageManager: 'deno@2.0.0' },
+    { name: 'pnpm lock', expectedManager: 'pnpm', setup: (repository) => fs.writeFileSync(path.join(repository, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n') },
+    { name: 'Yarn lock', expectedManager: 'yarn', setup: (repository) => fs.writeFileSync(path.join(repository, 'yarn.lock'), '# yarn lockfile v1\n') },
+  ];
+  for (const testCase of cases) {
+    const repository = makeRepository(`fix-validation-${testCase.name.replace(/[^a-z0-9]+/gi, '-')}`);
+    try {
+      fs.rmSync(path.join(repository, 'package-lock.json'), { force: true });
+      configureValidation(repository, witnessScript, testCase.packageManager);
+      testCase.setup?.(repository);
+      const result = runValidations(repository, { authorizedNames: ['test'] });
+      assert.equal(result.status, 'BLOCKED', testCase.name);
+      assert.equal(result.effectBoundary, 'NOT_EXECUTED', testCase.name);
+      assert.equal(result.executionScope.packageManager, testCase.expectedManager, testCase.name);
+      assert.equal(result.executionScope.implicitHooks, 'NOT_PROVEN_SUPPRESSED', testCase.name);
+      assert.equal(result.executionScope.packageManagerDetection.supported, false, testCase.name);
+      assert.equal(fs.existsSync(path.join(repository, witness)), false, `${testCase.name} must not execute npm`);
+    } finally {
+      cleanup(repository);
+    }
+  }
+});
+
+test('fix validation keeps npm as the explicit or contradiction-free default only', () => {
+  const script = 'node -e "process.exit(0)"';
+  const explicitRepository = makeRepository('fix-validation-explicit-npm-fixture');
+  const defaultRepository = makeRepository('fix-validation-default-npm-fixture');
+  try {
+    fs.rmSync(path.join(explicitRepository, 'package-lock.json'), { force: true });
+    configureValidation(explicitRepository, script, 'npm@10.0.0');
+    const explicit = runValidations(explicitRepository, { authorizedNames: ['test'] });
+    assert.equal(explicit.status, 'PASS');
+    assert.equal(explicit.validations[0].command.includes('--ignore-scripts'), true);
+    assert.equal(explicit.executionScope.packageManagerDetection.status, 'SUPPORTED_EXPLICIT');
+
+    fs.rmSync(path.join(defaultRepository, 'package-lock.json'), { force: true });
+    configureValidation(defaultRepository, script);
+    const fallback = runValidations(defaultRepository, { authorizedNames: ['test'] });
+    assert.equal(fallback.status, 'PASS');
+    assert.equal(fallback.validations[0].command.includes('--ignore-scripts'), true);
+    assert.equal(fallback.executionScope.packageManagerDetection.status, 'SUPPORTED_DEFAULT');
+  } finally {
+    cleanup(explicitRepository);
+    cleanup(defaultRepository);
   }
 });
 
