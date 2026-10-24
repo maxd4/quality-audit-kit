@@ -998,6 +998,87 @@ test('thresholds recommend separates current measurements, objectives and ratche
   }
 });
 
+test('thresholds require an explicit metric direction and measured engine evidence', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const unknownDirection = measuredRun({ runId: 'threshold-direction-unknown-001', seed: 'u' });
+    unknownDirection.metrics = [{ name: 'test_coverage', values: [70, 80, 90, 100], unit: 'percent', status: 'MEASURED', language: 'javascript', workspace: 'root', fileCategory: 'runtime' }];
+    fs.writeFileSync(path.join(repository, 'unknown.json'), `${JSON.stringify(unknownDirection, null, 2)}\n`);
+    const unknownFirst = runCli(repository, ['thresholds', 'recommend', 'unknown.json']);
+    const unknownSecond = runCli(repository, ['thresholds', 'recommend', 'unknown.json']);
+    assert.equal(unknownFirst.status, 0, unknownFirst.stderr);
+    assert.equal(unknownSecond.status, 0, unknownSecond.stderr);
+    assert.equal(unknownFirst.stdout, unknownSecond.stdout);
+    const unknownRecommendation = JSON.parse(unknownFirst.stdout);
+    assert.equal(unknownRecommendation.series[0].metric.direction, 'DIRECTION_UNKNOWN');
+    assert.equal(unknownRecommendation.series[0].directionStatus, 'UNKNOWN');
+    assert(unknownRecommendation.proposals.every((proposal) => proposal.status === 'DIRECTION_UNKNOWN'));
+    assert(unknownRecommendation.proposals.every((proposal) => proposal.recommendedObjective === null));
+
+    const configPath = path.join(repository, 'quality-audit-kit.config.json');
+    const initialConfig = { quality: { thresholds: { ratchet: { metrics: [{ metric: 'existing', unit: 'count', direction: 'LOWER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'runtime', scope: 'COMMITTED_SNAPSHOT', value: 1 }] } } } };
+    fs.writeFileSync(configPath, `${JSON.stringify(initialConfig, null, 2)}\n`);
+    const beforeUnknownApply = fs.readFileSync(configPath, 'utf8');
+    const unknownApply = runCli(repository, ['thresholds', 'recommend', 'unknown.json', '--apply', '--approve']);
+    assert.notEqual(unknownApply.status, 0);
+    assert.match(unknownApply.stderr, /direction|unknown/i);
+    assert.equal(fs.readFileSync(configPath, 'utf8'), beforeUnknownApply);
+
+    const validDirections = measuredRun({ runId: 'threshold-direction-valid-001', seed: 'v' });
+    validDirections.metrics = [
+      { name: 'test_coverage', values: [70, 80, 90, 100], unit: 'percent', status: 'MEASURED', direction: 'HIGHER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'runtime' },
+      { name: 'duplication_ratio', values: [4, 8, 12, 6], unit: 'percent', status: 'MEASURED', direction: 'LOWER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'runtime' },
+    ];
+    fs.writeFileSync(path.join(repository, 'valid-directions.json'), `${JSON.stringify(validDirections, null, 2)}\n`);
+    const validResult = runCli(repository, ['thresholds', 'recommend', 'valid-directions.json']);
+    assert.equal(validResult.status, 0, validResult.stderr);
+    const validRecommendation = JSON.parse(validResult.stdout);
+    const strictCoverage = validRecommendation.proposals.find((proposal) => proposal.metric.name === 'test_coverage' && proposal.profile === 'strict');
+    const strictDuplication = validRecommendation.proposals.find((proposal) => proposal.metric.name === 'duplication_ratio' && proposal.profile === 'strict');
+    assert.equal(strictCoverage.recommendedObjective.value, 100);
+    assert.equal(strictDuplication.recommendedObjective.value, 4);
+
+    const zeroEngines = measuredRun({ runId: 'threshold-no-engine-001', seed: 'z', findings: [{ id: 'finding-no-engine', path: 'src/a.js', message: 'no engine' }] });
+    zeroEngines.engines = [];
+    fs.writeFileSync(path.join(repository, 'zero-engines.json'), `${JSON.stringify(zeroEngines, null, 2)}\n`);
+    const zeroEnginesResult = runCli(repository, ['thresholds', 'recommend', 'zero-engines.json']);
+    assert.equal(zeroEnginesResult.status, 0, zeroEnginesResult.stderr);
+    const zeroEnginesRecommendation = JSON.parse(zeroEnginesResult.stdout);
+    assert.equal(zeroEnginesRecommendation.status, 'INSUFFICIENT_DATA');
+    assert.equal(zeroEnginesRecommendation.measurement.derivedFindingSeriesCount, 0);
+    assert(zeroEnginesRecommendation.measurement.warnings.some((warning) => warning.status === 'ENGINE_NOT_DECLARED'));
+
+    const failedEngine = measuredRun({ runId: 'threshold-failed-engine-001', seed: 'f', findings: [{ id: 'finding-failed-engine', path: 'src/a.js', message: 'failed engine' }] });
+    failedEngine.engines[0].measurementStatus = 'FAILURE';
+    fs.writeFileSync(path.join(repository, 'failed-engine.json'), `${JSON.stringify(failedEngine, null, 2)}\n`);
+    const failedEngineResult = runCli(repository, ['thresholds', 'recommend', 'failed-engine.json']);
+    assert.equal(failedEngineResult.status, 0, failedEngineResult.stderr);
+    const failedEngineRecommendation = JSON.parse(failedEngineResult.stdout);
+    assert.equal(failedEngineRecommendation.measurement.derivedFindingSeriesCount, 0);
+    assert(failedEngineRecommendation.measurement.warnings.some((warning) => warning.source === 'engine' && warning.status === 'FAILURE'));
+
+    const measuredFinding = measuredRun({ runId: 'threshold-measured-engine-001', seed: 'm', findings: [{ id: 'finding-measured-engine', path: 'src/a.js', message: 'measured engine' }] });
+    fs.writeFileSync(path.join(repository, 'measured-engine.json'), `${JSON.stringify(measuredFinding, null, 2)}\n`);
+    const measuredFindingResult = runCli(repository, ['thresholds', 'recommend', 'measured-engine.json']);
+    assert.equal(measuredFindingResult.status, 0, measuredFindingResult.stderr);
+    const measuredFindingRecommendation = JSON.parse(measuredFindingResult.stdout);
+    assert.equal(measuredFindingRecommendation.measurement.derivedFindingSeriesCount, 1);
+    assert.equal(measuredFindingRecommendation.series[0].metric.name, 'finding_count');
+
+    const notMeasuredFinding = measuredRun({ runId: 'threshold-not-measured-finding-001', seed: 'n', findings: [{ id: 'finding-not-measured', path: 'src/a.js', message: 'not measured' }] });
+    notMeasuredFinding.findings[0].measurementStatus = 'NOT_MEASURED';
+    fs.writeFileSync(path.join(repository, 'not-measured-finding.json'), `${JSON.stringify(notMeasuredFinding, null, 2)}\n`);
+    const notMeasuredResult = runCli(repository, ['thresholds', 'recommend', 'not-measured-finding.json']);
+    assert.equal(notMeasuredResult.status, 0, notMeasuredResult.stderr);
+    const notMeasuredRecommendation = JSON.parse(notMeasuredResult.stdout);
+    assert.equal(notMeasuredRecommendation.status, 'INSUFFICIENT_DATA');
+    assert.equal(notMeasuredRecommendation.measurement.derivedFindingSeriesCount, 0);
+    assert(notMeasuredRecommendation.measurement.warnings.some((warning) => warning.source === 'finding' && warning.status === 'NOT_MEASURED'));
+  } finally {
+    cleanup(repository);
+  }
+});
+
 test('thresholds recommend exposes atypical, absent and inferred category measurements without inventing cleanliness', () => {
   const repository = makeEmptyRepository();
   try {

@@ -1132,6 +1132,10 @@ function thresholdsCommand(positional, options) {
     if (!options.approve) throw new Error('thresholds --apply requires explicit --approve; recommendations and exports never mutate normative policy.');
     const profile = options.profile || 'balanced';
     if (!['progressive', 'balanced', 'strict'].includes(profile)) throw new Error(`Unsupported thresholds profile: ${profile}`);
+    const unknownDirection = result.proposals.filter((proposal) => proposal.status === 'DIRECTION_UNKNOWN');
+    if (unknownDirection.length) throw new Error('Cannot apply normative thresholds while one or more measured metric directions are unknown; provide an explicit validated direction first.');
+    const invalidMeasurements = result.measurement.warnings.filter((warning) => warning.status === 'INVALID');
+    if (invalidMeasurements.length) throw new Error('Cannot apply normative thresholds while one or more measurements are invalid; no normative mutation was applied.');
     const proposal = buildThresholdConfig(result, profile);
     if (!proposal.thresholds.length) throw new Error('No sufficiently measured threshold proposal is available for normative application.');
     const updated = mergeApprovedThresholdConfig(config, result, proposal, profile);

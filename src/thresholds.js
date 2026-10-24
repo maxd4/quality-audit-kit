@@ -78,9 +78,10 @@ function distribution(samples) {
 function normalizeDirection(value, name) {
   const normalized = String(value || '').toUpperCase().replace(/[- ]/g, '_');
   if (DIRECTIONS.includes(normalized)) return normalized;
-  return /(_COUNT|COUNT$|FINDING|DUPLICAT|UNUSED|ERROR|WARNING|DEBT|ISSUE)/i.test(name)
-    ? 'LOWER_IS_BETTER'
-    : 'LOWER_IS_BETTER';
+  // An explicit metric has no safe default direction. A direction may only
+  // come from the run contract; derived finding counts provide their own
+  // explicit LOWER_IS_BETTER direction below.
+  return 'DIRECTION_UNKNOWN';
 }
 
 function normalizeCategory(value) {
@@ -193,15 +194,23 @@ function explicitRecords(run, warnings) {
 }
 
 function derivedFindingRecords(run, warnings) {
-  const measuredEngines = new Set((run.engines || [])
-    .filter((engine) => engine.measurementStatus === 'MEASURED')
-    .map((engine) => engine.name));
-  for (const engine of (run.engines || [])) {
+  const engines = new Map((run.engines || [])
+    .filter((engine) => engine && typeof engine.name === 'string')
+    .map((engine) => [engine.name, engine]));
+  for (const engine of engines.values()) {
     if (engine.measurementStatus !== 'MEASURED') warnings.push({ source: 'engine', engine: engine.name, status: engine.measurementStatus, reason: 'Findings from unavailable, failed or skipped scanners are not counted as zero.' });
   }
   const groups = new Map();
   for (const finding of (run.findings || [])) {
-    if (finding.measurementStatus !== 'MEASURED' || (measuredEngines.size && !measuredEngines.has(finding.engine))) continue;
+    if (finding.measurementStatus !== 'MEASURED') {
+      warnings.push({ source: 'finding', findingId: finding.id || null, engine: finding.engine || null, status: finding.measurementStatus || 'UNKNOWN', reason: 'A finding is derived only when the finding and its engine are both MEASURED.' });
+      continue;
+    }
+    const engine = engines.get(finding.engine);
+    if (!engine || engine.measurementStatus !== 'MEASURED') {
+      warnings.push({ source: 'finding', findingId: finding.id || null, engine: finding.engine || null, status: engine?.measurementStatus || 'ENGINE_NOT_DECLARED', reason: 'A finding is derived only when its corresponding engine exists and is MEASURED.' });
+      continue;
+    }
     const dimensions = dimensionsForFinding(finding, run);
     const record = {
       name: 'finding_count',
@@ -293,7 +302,7 @@ function confidence(sampleCount, outlierCount, generated) {
 }
 
 function objectiveFor(series, profileId, cap) {
-  if (series.samples.length < MIN_SAMPLE_SIZE || series.generated || series.degraded) return null;
+  if (series.samples.length < MIN_SAMPLE_SIZE || series.generated || series.degraded || !DIRECTIONS.includes(series.direction)) return null;
   const d = series.distribution;
   let value;
   let basis;
@@ -320,7 +329,8 @@ function objectiveFor(series, profileId, cap) {
 function proposalFor(series, profile, cap) {
   const objective = objectiveFor(series, profile.id, cap);
   const generated = series.generated;
-  const status = generated ? 'EXCLUDED_BY_DEFAULT' : series.samples.length < MIN_SAMPLE_SIZE ? 'INSUFFICIENT_DATA' : series.degraded ? 'REVIEW_REQUIRED' : 'PROPOSED';
+  const directionUnknown = !DIRECTIONS.includes(series.direction);
+  const status = generated ? 'EXCLUDED_BY_DEFAULT' : series.samples.length < MIN_SAMPLE_SIZE ? 'INSUFFICIENT_DATA' : series.degraded ? 'REVIEW_REQUIRED' : directionUnknown ? 'DIRECTION_UNKNOWN' : 'PROPOSED';
   const findingCount = series.findingIds.size || (series.findingCountKnown ? series.findingCount : null);
   const exceeded = (threshold) => {
     if (threshold === null || threshold === undefined) return [];
@@ -336,12 +346,14 @@ function proposalFor(series, profile, cap) {
   if (series.degraded) justifications.push('La source est marquée dégradée : aucune cible normative n’est proposée automatiquement.');
   if (generated) justifications.push('La catégorie generated est informative et exclue par défaut des seuils normatifs.');
   if (series.samples.length < MIN_SAMPLE_SIZE) justifications.push(`Échantillon insuffisant: ${MIN_SAMPLE_SIZE} mesures sont nécessaires pour proposer une cible.`);
+  if (directionUnknown) justifications.push('Direction métier inconnue : la distribution reste descriptive, mais aucune cible normative ne peut être proposée ou appliquée sans confirmation explicite.');
   return {
     proposalId: stableId({ series: series.id, profile: profile.id }),
     profile: profile.id,
     profileLabel: profile.label,
     status,
     metric: { name: series.name, unit: series.unit, direction: series.direction },
+    directionStatus: directionUnknown ? 'UNKNOWN' : 'KNOWN',
     dimensions: series.dimensions,
     currentMeasurement: {
       latest: round(series.samples[series.samples.length - 1]?.value),
@@ -368,7 +380,7 @@ function proposalFor(series, profile, cap) {
       affectedFindings: findingCount,
       application: objective
         ? 'L’application modifierait la configuration normative et doit être explicitement approuvée.'
-        : 'Aucune application normative possible tant que la mesure ou sa qualité ne fournit pas de preuve suffisante.',
+        : 'Aucune application normative possible tant que la mesure, sa direction ou sa qualité ne fournit pas de preuve suffisante.',
     },
   };
 }
@@ -434,6 +446,7 @@ function recommendThresholds(run, options = {}) {
       distribution: item.distribution,
       sampleCount: item.samples.length,
       generatedExcludedByDefault: item.generated,
+      directionStatus: DIRECTIONS.includes(item.direction) ? 'KNOWN' : 'UNKNOWN',
     })),
     proposals,
     noGlobalQualityScore: true,
