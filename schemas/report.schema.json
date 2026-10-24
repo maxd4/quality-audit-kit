@@ -46,7 +46,7 @@
           "scope": { "type": "string" },
           "engine": { "type": "string", "minLength": 1 },
           "version": { "type": "string", "minLength": 1 },
-          "measurementStatus": { "enum": ["MEASURED", "NOT_MEASURED", "FAILURE", "SKIPPED_BY_POLICY"] },
+          "measurementStatus": { "enum": ["MEASURED", "PARTIAL", "NOT_MEASURED", "FAILURE", "SKIPPED_BY_POLICY"] },
           "validationState": { "enum": ["VALIDATED", "MEASURED_UNVERIFIED", "FAILED", "NOT_MEASURED", "SKIPPED"] },
           "sourceRevision": {
             "type": "object",
@@ -78,6 +78,7 @@
     },
     "measurementFailures": { "type": "array", "items": { "type": "object" } },
     "recommendations": { "type": "array", "items": { "type": "string" } },
+    "diagnostics": { "type": "array", "items": { "type": "object" } },
     "comparison": { "type": "object" },
     "qualityGate": { "type": "object" }
   }

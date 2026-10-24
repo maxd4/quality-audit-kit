@@ -487,6 +487,18 @@
         }
       }
     },
+    "connector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "projectKey", "version", "sourceRevision"],
+      "properties": {
+        "name": { "type": "string" },
+        "projectKey": { "type": "string" },
+        "branch": { "type": ["string", "null"] },
+        "version": { "type": "string" },
+        "sourceRevision": { "$ref": "#/$defs/sourceRevision" }
+      }
+    },
     "engines": {
       "type": "array",
       "minItems": 1,
@@ -509,6 +521,7 @@
           "measurementStatus": {
             "enum": [
               "MEASURED",
+              "PARTIAL",
               "NOT_MEASURED",
               "FAILURE",
               "SKIPPED_BY_POLICY"
@@ -528,6 +541,11 @@
           "scope": {
             "type": "string"
           },
+          "connector": { "type": "string" },
+          "projectKey": { "type": "string" },
+          "branch": { "type": "string" },
+          "pullRequest": { "type": "string" },
+          "metadata": { "type": "object", "additionalProperties": true },
           "sourceRevision": {
             "$ref": "#/$defs/sourceRevision"
           }
@@ -597,6 +615,7 @@
           "measurementStatus": {
             "enum": [
               "MEASURED",
+              "PARTIAL",
               "NOT_MEASURED",
               "FAILURE",
               "SKIPPED_BY_POLICY"
@@ -658,6 +677,20 @@
     "metrics": {
       "type": "array",
       "items": { "$ref": "#/$defs/metric" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["kind", "code", "message"],
+        "properties": {
+          "kind": { "type": "string", "minLength": 1 },
+          "code": { "type": "string", "minLength": 1 },
+          "reference": { "type": "string" },
+          "message": { "type": "string", "minLength": 1 }
+        }
+      }
     }
   }
 }

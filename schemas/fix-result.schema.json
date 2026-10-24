@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/quality-audit-kit/fix-result.schema.json",
+  "title": "Quality Audit Kit correction execution result",
+  "description": "Redacted evidence for one explicitly authorized correction attempt. It never implies commit, push or baseline mutation.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schemaVersion", "fixVersion", "kind", "mode", "status", "planId", "runId", "authorization", "noImplicitMutation"],
+  "properties": {
+    "schemaVersion": { "const": "0.1-draft" },
+    "fixVersion": { "const": "0.1-draft" },
+    "kind": { "const": "QUALITY_FIX_RESULT" },
+    "mode": { "enum": ["PREVIEW", "EXECUTION"] },
+    "status": { "enum": ["READY", "RESOLVED", "FAILED", "BLOCKED", "UNVERIFIED", "NEEDS_TRIAGE", "NEEDS_REVIEW", "BLOCKED_BY_MEASUREMENT"] },
+    "planId": { "type": "string" },
+    "runId": { "type": "string" },
+    "authorization": { "type": "object", "required": ["required", "received", "execution"], "properties": { "required": { "const": true }, "received": { "type": "boolean" }, "execution": { "type": "string" } } },
+    "noImplicitMutation": { "const": true }
+  }
+}

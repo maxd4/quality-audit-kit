@@ -22,7 +22,7 @@ A local-first tool for JS/TS repositories that imports existing scanner outputs 
 - A full replacement scanner or automatic refactoring agent.
 - Broad language support by assertion alone.
 - Public npm package until independent adoption tests pass.
-- GitHub Action, SARIF and hosted service as MVP blockers.
+- hosted service or automatic GitHub publication; local SARIF and optional SonarQube connectors are available without making an external account mandatory.
 - Autonomous acceptance or deletion of findings based solely on an AI suggestion.
 
 ## Local CLI prototype

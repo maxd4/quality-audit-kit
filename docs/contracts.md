@@ -13,6 +13,7 @@ A run has `schemaVersion`, a unique `runId`, a `repository` context, an `inputSc
 | Engine `measurementStatus` | Meaning | Implication |
 | --- | --- | --- |
 | `MEASURED` | Engine produced usable measurement | Findings may be zero if this is explicit |
+| `PARTIAL` | Some results were imported, but a configured limit, page failure or required metadata prevented completeness | Findings are retained as partial evidence; never infer absence or comparability |
 | `NOT_MEASURED` | No reliable measurement produced | Do not infer no problems |
 | `FAILURE` | Attempted execution failed | Preserve failure details |
 | `SKIPPED_BY_POLICY` | Deliberately not executed | Record policy reason |
@@ -36,6 +37,12 @@ Proposed fingerprint input: `engine + ruleId + normalized repo-relative path + s
 `RESOLVED` means absent in a comparable completed measurement, **not** absent when the engine did not run.
 
 ## Human decision contract
+
+## Optional connector contract
+
+SARIF 2.1.0 is a local interchange connector. Import maps `tool.driver.name`/version, `result.ruleId`, the first representable physical location, `result.level`, message, a stable GUID/fingerprint locus and a `sarif://` raw reference to the canonical finding. Lifecycle remains `UNCLASSIFIED` until history qualifies it. SARIF fields such as code flows, fixes, related locations and missing repository-relative locations are retained as explicit run diagnostics; source `revisionId` is `UNVERIFIED` unless a separate process proves local content equivalence. Export reverses this mapping and carries Quality Audit Kit fields under SARIF `properties`.
+
+SonarQube import is opt-in and uses the official Web API: `/api/server/version`, `/api/issues/search` and `/api/project_analyses/search`. Project, branch or pull-request selector, API version, pagination limit and analysis revision are recorded. A Sonar analysis revision is independent from the local Git context SHA and is never replaced with `HEAD`; absent or non-demonstrable revision evidence is `UNKNOWN`. Token material is read from an environment variable or a file outside the repository and is excluded from runs, logs and bundles. HTTP permission errors, page failures and result limits remain `FAILURE`/`PARTIAL` diagnostics rather than clean measurements.
 
 A decision identifies the exact finding and, for the current CLI, one of `FIX`, `DEFER`, `KEEP_JUSTIFIED` or `FALSE_POSITIVE`, with a reason, reviewer attribution, reviewed revision, evidence links and optionally an expiration/re-review condition. The schema retains older draft values for compatibility with prior examples, but the new CLI does not create them. An exact classification in CleanMyMap is not a universally appropriate future policy; these generic values remain repository-owned.
 
@@ -90,6 +97,7 @@ Each proposal has separate current measurement, recommended objective and histor
 - [`triage-decision.schema.json`](../schemas/triage-decision.schema.json)
 - [`plan.schema.json`](../schemas/plan.schema.json)
 - [`threshold-recommendation.schema.json`](../schemas/threshold-recommendation.schema.json)
+- [`fix-result.schema.json`](../schemas/fix-result.schema.json)
 - [Synthetic run](../examples/run.example.json)
 - [Synthetic decisions](../examples/decisions.example.json)
 

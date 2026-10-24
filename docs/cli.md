@@ -11,14 +11,20 @@ quality-audit-kit init [repository] [--force] [--templates deterministic|none] [
 quality-audit-kit init [repository] --agent codex [--agent-prompt file] [--agent-input file]
 quality-audit-kit init [repository] --link-agents
 quality-audit-kit context refresh [repository] [--preview]
-quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--run[=knip,jscpd]] [--baseline file] [--decisions file]
+quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--sarif-report file] [--run[=knip,jscpd]] [--baseline file] [--decisions file]
+quality-audit-kit connect sonar [--sonar-url URL] [--sonar-project KEY] [--sonar-token-env NAME|--sonar-token-file FILE]
+quality-audit-kit import sonar [repository] --sonar-url URL --sonar-project KEY [--sonar-branch NAME|--sonar-pull-request KEY] [--sonar-max-results N] [--output file]
+quality-audit-kit import sarif report.sarif [--repository repository] [--output file]
 quality-audit-kit baseline run.json [--output file] [--replace] [--preview]
 quality-audit-kit triage run.json [--baseline file] [--decisions file] [--finding id --decision FIX|DEFER|KEEP_JUSTIFIED|FALSE_POSITIVE --reason text --reviewer name --reviewed-revision sha --evidence TYPE|REFERENCE|OUTCOME]
-quality-audit-kit report run.json [--format terminal|markdown|json] [--output file] [--bundle file.zip] [--include-evidence file[,file...]]
+quality-audit-kit report run.json [--format terminal|markdown|json|sarif] [--output file] [--bundle file.zip] [--include-evidence file[,file...]]
 quality-audit-kit report --verify-bundle file.zip
 quality-audit-kit plan run.json [--output plan.json] [--markdown plan.md] [--baseline file] [--decisions file]
 quality-audit-kit plan --next [plan.json]
 quality-audit-kit plan --export plan.json [--output prompts-directory]
+quality-audit-kit fix --next [plan.json] [--output fix-result.json]
+quality-audit-kit fix --next [plan.json] --execute --approve [--agent codex|command|deterministic] [--codex-command executable]
+quality-audit-kit verify fix-result.json [--output verification.json]
 quality-audit-kit thresholds recommend run.json [--baseline file] [--format json|markdown] [--output file] [--export config.json] [--profile progressive|balanced|strict]
 quality-audit-kit thresholds recommend run.json --apply --approve [--profile progressive|balanced|strict]
 ```
@@ -76,7 +82,11 @@ By default `scan` writes the run JSON to stdout. This avoids changing the analyz
 
 `report` renders a saved run as a readable terminal summary by default. `--format markdown` writes a deterministic Markdown report and `--format json` writes the structured report contract in [`schemas/report.schema.json`](../schemas/report.schema.json). Every measurement repeats its `runId`, source SHA (when proven), context SHA, scope, engine, version, measurement status and validation state. Findings are separated into new, historical actionable, historical justified, resolved, reintroduced and unclassified groups; measurement failures and recommendations are separate. No global quality score is emitted.
 
-`report --format zip --output quality-audit-kit-run.zip` creates a deterministic offline bundle. It contains the sanitized run, structured JSON, Markdown, terminal summary, `manifest.json`, `inventory.json`, `checksums.sha256` and `VERIFY.txt`. `report --verify-bundle quality-audit-kit-run.zip` validates the ZIP, checksums, manifest, inventory, runId and context SHA without network access. `--include-evidence file[,file...]` is optional and only accepts explicitly authorized, non-source text/report files inside the run directory; source files, secret-like names, binary files and detected tokens are refused. Output files are written atomically and existing artifacts are never overwritten.
+`report --format zip --output quality-audit-kit-run.zip` creates a deterministic offline bundle. It contains the sanitized run, structured JSON, Markdown, terminal summary, `manifest.json`, `inventory.json`, `checksums.sha256` and `VERIFY.txt`. `report --verify-bundle quality-audit-kit-run.zip` validates the ZIP, rejects duplicate or unlisted entries, recalculates byte counts and SHA-256 values against the actual contents, and checks manifest, inventory, runId and context SHA without network access. `--include-evidence file[,file...]` is optional and only accepts explicitly authorized, non-source text/report files inside the run directory; real-path resolution rejects symlink or parent-directory escapes, while source files, secret-like names, binary files and detected tokens are refused. Output files are written atomically and existing artifacts are never overwritten. A successful verification proves internal bundle consistency only; it is not cryptographic authorship or code-quality attestation.
+
+`scan --sarif-report report.sarif` imports a local SARIF 2.1.0 document through the canonical normalizer. `report --format sarif` exports canonical findings; lifecycle, measurement state, provenance and non-representable diagnostics are retained in SARIF properties. Unsupported locations are explicit diagnostics, not silently dropped.
+
+`connect sonar` checks `/api/server/version`. `import sonar` reads `/api/issues/search` and `/api/project_analyses/search`, paginates with a bounded limit (default 1000, maximum 10000), records project/branch/pull-request/version metadata and preserves partial or permission failures. Tokens come only from `SONAR_TOKEN`/`--sonar-token-env` or a file outside the analyzed repository. The SonarQube analysis revision remains separate and `UNVERIFIED`; the local HEAD SHA is context only and is never assigned to imported findings.
 
 ## Correction planning
 
@@ -87,6 +97,18 @@ The order is explained, not scored: confirmed security, regressions, broken cont
 `plan --next plan.json` returns the highest-priority lot with all predecessors available. It returns `NEEDS_TRIAGE`, `BLOCKED_BY_MEASUREMENT` or `NEEDS_REVIEW` instead of selecting a correction when the evidence is insufficient. `plan --export plan.json --output codex-prompts` writes one autonomous prompt per lot. Prompts include the objective, approved files, findings and provenance, invariants, verification checks and a stop condition. They do not execute Codex, modify source, change a baseline or install dependencies.
 
 Optional planning annotations belong under a finding's `planning` object in the audit-run contract. In particular, `commonCauseId` plus `commonCauseEvidence`/`commonCauseConfirmed` is required for cross-finding grouping; `responsibility`, `category`, `confidence`, `consumers`, `estimatedCost`, `changeRisk` and explicit dependency fields refine the plan without becoming an opaque score.
+
+## Correction workflow
+
+`fix --next plan.json` is read-only by default. It presents the highest-priority ready lot selected by `plan --next`, the generated prompt and the repository-relative file allowlist. It does not modify source files, write a baseline, create a commit or push anything.
+
+Agent execution requires both `--execute` and `--approve`. The default adapter is the locally installed Codex CLI and uses `codex exec --approve-for-me --ephemeral` (the installed CLI maps this approval mode to workspace-write); no Codex binary is installed implicitly and no cloud service is required by Quality Audit Kit. `--agent command --agent-command executable` provides a minimal adapter boundary for another local agent, while `--agent deterministic` is a deterministic test adapter that replaces the `QAK_FIX_ME` fixture marker only.
+
+The agent receives the prompt generated by `plan` plus a bounded allowlist. Pre-existing changes in an approved file block execution. After execution, the workflow audits the Git worktree and rejects out-of-scope changes, deletions and HEAD changes without reverting them. Commits, pushes, baseline changes, policy changes and dependency installation are not performed by the workflow or authorized in the agent prompt.
+
+The workflow re-runs the scanners represented by the lot when local binaries are available, then runs detected safe validation scripts whose names begin with `test`, `check`, `lint`, `typecheck`, `validate` or `verify`. It distinguishes `RESOLVED`, `FAILED`, `BLOCKED` and `UNVERIFIED`: a missing scanner or validation, an unverified dirty-worktree revision, an agent error or a remaining targeted finding never becomes a successful resolution. `--output fix-result.json` preserves a redacted execution journal containing the agent output, scope audit, reanalysis and validation evidence; existing artifacts are not overwritten.
+
+`verify fix-result.json` is read-only. It checks the result contract, redaction boundary, scope audit, targeted reanalysis state and validation outcome. It never runs an agent and never changes the project.
 
 ## Threshold recommendations
 
@@ -104,9 +126,11 @@ The CLI emits `schemaVersion: 0.1-draft`, `inputScope: WORKTREE_LIVE` and `repro
 
 Finding IDs are SHA-256 fingerprints of the engine, rule, normalized repository-relative path and a stable rule-specific locus. Line movement alone is not part of the fingerprint. jscpd fingerprints include the normalized duplicate pair and available fragment/token information; path moves and scanner-specific changes can still legitimately change an ID.
 
-SARIF export, package publication, hosted service and automatic remediation remain unimplemented. Baseline replacement and triage writes are explicit local mutations; scanning itself does not modify analyzed source code.
+Package publication, hosted service and automatic remediation remain unimplemented. SARIF and SonarQube connectors are optional and local-first; no account is required by the other commands. Baseline replacement and triage writes are explicit local mutations; scanning itself does not modify analyzed source code.
 
 ## References for imported formats
 
 - [Knip reporters](https://knip.dev/features/reporters)
 - [jscpd reporters and JSON output](https://github.com/kucherenko/jscpd/blob/master/docs/rust.md)
+- [SARIF 2.1.0 OASIS standard](https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/sarif-v2.1.0-os.html)
+- [SonarQube Web API and bearer authentication](https://docs.sonarsource.com/sonarqube-server/extension-guide/web-api)

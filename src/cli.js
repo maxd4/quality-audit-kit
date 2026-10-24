@@ -24,6 +24,9 @@ const {
 } = require('./report');
 const { buildPlan, nextLot, renderPlanMarkdown } = require('./planner');
 const { buildThresholdConfig, recommendThresholds, renderThresholdsMarkdown } = require('./thresholds');
+const { executeFix, verifyFixResult } = require('./fix');
+const { buildSarif, importSarifFile } = require('./sarif');
+const { connectSonar, importSonar } = require('./sonar');
 const {
   TEMPLATE_FILES,
   buildAgentPrompt,
@@ -59,7 +62,7 @@ function parseArguments(argv) {
     }
     const name = token.slice(2);
     const next = tokens[index + 1];
-    if (next && !next.startsWith('--') && !['help', 'force', 'preview', 'update-templates', 'link-agents', 'replace', 'next', 'apply', 'approve'].includes(name)) {
+    if (next && !next.startsWith('--') && !['help', 'force', 'preview', 'update-templates', 'link-agents', 'replace', 'next', 'apply', 'approve', 'execute'].includes(name)) {
       options[name] = next;
       index += 1;
     } else {
@@ -217,6 +220,7 @@ async function scanCommand(positional, options) {
   };
   const findings = [];
   const engines = [];
+  const diagnostics = [];
 
   for (const scanner of SCANNERS) {
     const scannerConfig = config.scanners?.[scanner] || {};
@@ -245,6 +249,19 @@ async function scanCommand(positional, options) {
     findings.push(...(result.findings || []));
   }
 
+  if (options['sarif-report'] !== undefined) {
+    const selected = options['sarif-report'] === true ? 'results.sarif' : String(options['sarif-report']);
+    const sarifPath = path.isAbsolute(selected) ? selected : path.resolve(target, selected);
+    try {
+      const result = importSarifFile(target, sarifPath);
+      engines.push(result.engine);
+      findings.push(...result.findings);
+      diagnostics.push(...result.diagnostics);
+    } catch (error) {
+      engines.push({ name: 'sarif', measurementStatus: 'FAILURE', gateOutcome: 'NOT_EVALUATED', sourceRevision: { status: 'UNKNOWN', sha: null, basis: 'SARIF import failed before a source revision could be established.' }, scope: '.', diagnostic: error.message });
+    }
+  }
+
   const run = {
     schemaVersion: '0.1-draft',
     runId: createRunId(),
@@ -260,6 +277,7 @@ async function scanCommand(positional, options) {
     discovery: discoveryForOutput(discovery),
     engines,
     findings,
+    ...(diagnostics.length ? { diagnostics } : {}),
   };
 
   const configuredBaseline = config.quality?.baseline;
@@ -292,7 +310,7 @@ async function scanCommand(positional, options) {
   const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
   if (outputPath) writeOutput(outputPath, content);
   else process.stdout.write(content);
-  if (engines.some((engine) => engine.measurementStatus === 'FAILURE')
+  if (engines.some((engine) => ['FAILURE', 'PARTIAL'].includes(engine.measurementStatus))
     || run.comparison?.status === 'NOT_EVALUATED'
     || ['FAIL', 'NOT_EVALUATED'].includes(run.qualityGate?.status)) process.exitCode = 2;
   return run;
@@ -730,6 +748,122 @@ function planExportCommand(positional, options) {
   process.stdout.write(`${JSON.stringify({ command: 'plan --export', status: 'EXPORTED', planId: plan.planId, runId: plan.runId, outputDirectory: path.relative(process.cwd(), outputDirectory).split(path.sep).join('/'), files }, null, 2)}\n`);
 }
 
+async function fixCommand(positional, options) {
+  if (!options.next) throw new Error('fix currently requires --next; it never selects an arbitrary lot implicitly.');
+  const input = positional[0] || options.plan;
+  const planPath = path.resolve(process.cwd(), input || 'quality-audit-kit.plan.json');
+  const plan = loadPlanOrCreate(planPath, options);
+  const next = nextLot(plan);
+  const target = findRepositoryRoot(options.repository || path.dirname(planPath));
+  const result = await executeFix({
+    plan,
+    next,
+    root: target,
+    agentName: options.agent || 'codex',
+    agentOptions: { command: options['codex-command'] || options['agent-command'] },
+    execute: options.execute === true,
+    approve: options.execute === true && options.approve === true,
+  });
+  const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
+  const content = `${JSON.stringify(result, null, 2)}\n`;
+  if (outputPath) writeOutput(outputPath, content);
+  else process.stdout.write(content);
+  if (['FAILED', 'BLOCKED', 'UNVERIFIED', 'NEEDS_TRIAGE', 'NEEDS_REVIEW', 'BLOCKED_BY_MEASUREMENT'].includes(result.status)) process.exitCode = 2;
+  return result;
+}
+
+function verifyCommand(positional, options) {
+  const input = positional[0] || options.input;
+  if (!input) throw new Error('verify requires a fix result JSON path.');
+  const result = verifyFixResult(readJson(path.resolve(process.cwd(), input)));
+  const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
+  const content = `${JSON.stringify(result, null, 2)}\n`;
+  if (outputPath) writeOutput(outputPath, content);
+  else process.stdout.write(content);
+  if (result.status !== 'RESOLVED' || result.verified !== true) process.exitCode = 2;
+  return result;
+}
+
+async function connectCommand(positional, options) {
+  if (positional[0] !== 'sonar') throw new Error('connect currently supports only the sonar connector.');
+  const result = await connectSonar({
+    root: findRepositoryRoot(options.repository || process.cwd()),
+    url: options['sonar-url'] || options.url || process.env.SONAR_URL,
+    project: options['sonar-project'] || options.project || process.env.SONAR_PROJECT,
+    tokenEnv: options['sonar-token-env'],
+    tokenFile: options['sonar-token-file'],
+  });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  return result;
+}
+
+async function importCommand(positional, options) {
+  if (positional[0] === 'sarif') {
+    const target = findRepositoryRoot(options.repository || process.cwd());
+    const input = options['sarif-report'] || options.input || positional[1];
+    if (!input) throw new Error('import sarif requires a SARIF 2.1.0 file path.');
+    const filePath = path.isAbsolute(String(input)) ? String(input) : path.resolve(process.cwd(), String(input));
+    const discovery = discover(target);
+    const result = importSarifFile(target, filePath);
+    const run = {
+      schemaVersion: '0.1-draft',
+      runId: createRunId(),
+      repository: { name: discovery.repositoryName, sourceScopeDescription: 'SARIF findings were imported from an explicitly selected local report; any Git context is not an analyzed source revision.' },
+      inputScope: 'WORKTREE_LIVE',
+      reproducible: false,
+      generatedAt: new Date().toISOString(),
+      discovery: discoveryForOutput(discovery),
+      engines: [result.engine],
+      findings: result.findings,
+      ...(result.diagnostics.length ? { diagnostics: result.diagnostics } : {}),
+      connector: { name: 'sarif', projectKey: 'local-file', version: result.engine.version, sourceRevision: result.engine.sourceRevision },
+    };
+    const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
+    const content = `${JSON.stringify(run, null, 2)}\n`;
+    if (outputPath) writeOutput(outputPath, content);
+    else process.stdout.write(content);
+    if (result.engine.measurementStatus !== 'MEASURED') process.exitCode = 2;
+    return run;
+  }
+  if (positional[0] !== 'sonar') throw new Error('import currently supports only the sarif and sonar connectors.');
+  const target = findRepositoryRoot(options.repository || positional[1] || process.cwd());
+  const discovery = discover(target);
+  const result = await importSonar(target, {
+    url: options['sonar-url'] || options.url || process.env.SONAR_URL,
+    project: options['sonar-project'] || options.project || process.env.SONAR_PROJECT,
+    branch: options['sonar-branch'] || options.branch,
+    pullRequest: options['sonar-pull-request'] || options.pullRequest,
+    revision: options['sonar-revision'] || options.revision,
+    maxResults: options['sonar-max-results'] || options.maxResults,
+    tokenEnv: options['sonar-token-env'],
+    tokenFile: options['sonar-token-file'],
+  });
+  const contextCommitSha = gitCommit(target);
+  const run = {
+    schemaVersion: '0.1-draft',
+    runId: createRunId(),
+    repository: {
+      name: discovery.repositoryName,
+      ...(contextCommitSha ? { contextCommitSha, commitSha: contextCommitSha } : {}),
+      sourceScopeDescription: 'SonarQube findings were imported from the declared project analysis. Any local Git SHA is context only; engine.sourceRevision is the SonarQube analysis revision.',
+    },
+    inputScope: 'WORKTREE_LIVE',
+    reproducible: false,
+    generatedAt: new Date().toISOString(),
+    discovery: discoveryForOutput(discovery),
+    engines: [result.engine],
+    findings: result.findings,
+    ...(result.diagnostics.length ? { diagnostics: result.diagnostics } : {}),
+    connector: { name: 'sonarqube', projectKey: result.project, ...(result.branch ? { branch: result.branch } : {}), version: result.version, sourceRevision: result.sourceRevision },
+  };
+  const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
+  const content = `${JSON.stringify(run, null, 2)}\n`;
+  if (outputPath) writeOutput(outputPath, content);
+  else process.stdout.write(content);
+  if (result.status !== 'MEASURED') process.exitCode = 2;
+  return run;
+}
+
 function reportCommand(positional, options) {
   if (options['verify-bundle'] !== undefined) {
     const bundlePath = options['verify-bundle'] === true ? positional[0] : options['verify-bundle'];
@@ -743,7 +877,7 @@ function reportCommand(positional, options) {
   const resolvedInput = path.resolve(process.cwd(), inputPath);
   const run = readJson(resolvedInput);
   const format = options.format || 'terminal';
-  if (!['terminal', 'markdown', 'json', 'zip'].includes(format)) throw new Error(`Unsupported report format: ${format}`);
+  if (!['terminal', 'markdown', 'json', 'sarif', 'zip'].includes(format)) throw new Error(`Unsupported report format: ${format}`);
   const bundlePath = options.bundle ? path.resolve(process.cwd(), options.bundle) : (format === 'zip' && options.output ? path.resolve(process.cwd(), options.output) : null);
   if (format === 'zip' && !bundlePath) throw new Error('report --format zip requires --bundle file.zip or --output file.zip.');
   if (bundlePath) createBundle(run, resolvedInput, bundlePath, options);
@@ -753,6 +887,7 @@ function reportCommand(positional, options) {
   }
   const content = format === 'json'
     ? `${JSON.stringify(buildStructuredReport(run), null, 2)}\n`
+    : format === 'sarif' ? `${JSON.stringify(buildSarif(run), null, 2)}\n`
     : format === 'markdown' ? renderMarkdown(run) : renderTerminal(run);
   const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
   if (outputPath) writeOutput(outputPath, content);
@@ -825,9 +960,17 @@ function printThresholdsHelp() {
   process.stdout.write('\nThresholds usage:\n  quality-audit-kit thresholds recommend run.json [--baseline file] [--format json|markdown] [--output file] [--export config.json] [--profile progressive|balanced|strict]\n  quality-audit-kit thresholds recommend run.json --apply --approve [--profile progressive|balanced|strict]\n\nthresholds recommend is a local advisory analysis. It reports distributions, quantiles, extremes, exceedances and three explainable profiles by metric, language, workspace and file category. Generated files, unavailable scanners, failed measurements and insufficient samples do not become zero findings. --export writes a proposal; only --apply --approve can modify normative thresholds.\n');
 }
 
+function printFixHelp() {
+  process.stdout.write('\nFix and verify usage:\n  quality-audit-kit fix --next [plan.json] [--output fix-result.json]\n  quality-audit-kit fix --next [plan.json] --execute --approve [--agent codex|command|deterministic] [--codex-command executable]\n  quality-audit-kit verify fix-result.json [--output verification.json]\n\nfix --next is read-only by default and presents the next bounded lot. Agent execution requires both --execute and --approve. The agent receives an allowlist from the plan; commits, pushes, deletions, baseline changes, policy changes and writes outside the allowlist are prohibited and audited. verify checks only the redacted execution evidence and never runs an agent.\n');
+}
+
+function printConnectorHelp() {
+  process.stdout.write('\nConnector usage:\n  quality-audit-kit scan [repository] --sarif-report report.sarif\n  quality-audit-kit import sarif report.sarif [--repository repository] [--output run.json]\n  quality-audit-kit report run.json --format sarif --output report.sarif\n  quality-audit-kit connect sonar --sonar-url URL [--sonar-token-env NAME|--sonar-token-file FILE]\n  quality-audit-kit import sonar [repository] --sonar-url URL --sonar-project KEY [--sonar-branch NAME|--sonar-pull-request KEY] [--sonar-max-results N] [--output run.json]\n\nSARIF is local and requires no account. SonarQube uses official API endpoints, keeps tokens outside repository artifacts, paginates with a bounded result limit and records Sonar analysis revision separately from local Git context.\n');
+}
+
 async function main(argv) {
   const { command, options, positional } = parseArguments(argv);
-  if (options.help || command === 'help' || command === '--help') { printHelpDetailed(); printPlanHelp(); printThresholdsHelp(); return; }
+  if (options.help || command === 'help' || command === '--help') { printHelpDetailed(); printPlanHelp(); printThresholdsHelp(); printFixHelp(); printConnectorHelp(); return; }
   if (options.version || command === '--version') return process.stdout.write(`${require('../package.json').version}\n`);
   if (command === 'init') return initCommand(positional, options);
   if (command === 'context') {
@@ -838,6 +981,10 @@ async function main(argv) {
   if (command === 'baseline') return baselineCommand(positional, options);
   if (command === 'triage') return triageCommand(positional, options);
   if (command === 'plan') return planCommand(positional, options);
+  if (command === 'fix') return fixCommand(positional, options);
+  if (command === 'verify') return verifyCommand(positional, options);
+  if (command === 'connect') return connectCommand(positional, options);
+  if (command === 'import') return importCommand(positional, options);
   if (command === 'report') return reportCommand(positional, options);
   if (command === 'thresholds') return thresholdsCommand(positional, options);
   throw new Error(`Unknown command: ${command}. Use --help for usage.`);

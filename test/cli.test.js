@@ -4,6 +4,12 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
+const { createDeterministicAdapter } = require('../src/agents');
+const { classifyExecution, executeFix, verifyFixResult } = require('../src/fix');
+const { buildPlan, nextLot } = require('../src/planner');
+const { buildSarif, importSarifFile } = require('../src/sarif');
+const { connectSonar, importSonar } = require('../src/sonar');
+const { buildStructuredReport, createBundle, createZip, readZipEntries, validateRun, verifyBundle } = require('../src/report');
 
 const ROOT = path.resolve(__dirname, '..');
 const CLI = path.join(ROOT, 'bin', 'quality-audit-kit.js');
@@ -145,7 +151,7 @@ test('template refresh previews and preserves manual decisions idempotently', ()
     fs.writeFileSync(handoffPath, edited, 'utf8');
 
     const preview = runCli(repository, ['init', '--update-templates', '--preview']);
-    assert.equal(preview.status, 0, preview.stderr);
+    assert.equal(preview.status, 0, `${preview.stderr}\n${preview.stdout}`);
     const previewSummary = JSON.parse(preview.stdout);
     assert.equal(previewSummary.configStatus, 'PREVIEW');
     assert.equal(previewSummary.templates.files.some((file) => file.status === 'PREVIEW'), true);
@@ -424,6 +430,65 @@ test('report rejects SHA/run identity contradictions and unsafe evidence', () =>
     const sourceBundle = runCli(repository, ['report', 'valid.json', '--format', 'zip', '--output', 'source.zip', '--include-evidence', 'source.js']);
     assert.notEqual(sourceBundle.status, 0);
     assert.equal(fs.existsSync(path.join(repository, 'source.zip')), false);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('offline bundles refuse symlink escapes and redact Unix absolute paths', () => {
+  const repository = makeEmptyRepository();
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'quality-audit-kit-outside-'));
+  try {
+    const run = measuredRun({ runId: 'report-run-0004', seed: 'f', findings: [{ id: 'finding-report-0004', path: 'src/private.js', message: 'private path diagnostic' }] });
+    fs.writeFileSync(path.join(repository, 'run.json'), `${JSON.stringify(run, null, 2)}\n`);
+    fs.writeFileSync(path.join(outside, 'outside.md'), '# outside evidence\n', 'utf8');
+    fs.symlinkSync(path.join(outside, 'outside.md'), path.join(repository, 'evidence-link.md'), 'file');
+    const escaped = runCli(repository, ['report', 'run.json', '--format', 'zip', '--output', 'escaped.zip', '--include-evidence', 'evidence-link.md']);
+    assert.notEqual(escaped.status, 0);
+    assert.match(escaped.stderr, /outside|destination|safely|Evidence/i);
+    assert.equal(fs.existsSync(path.join(repository, 'escaped.zip')), false);
+
+    run.repository.name = '/home/user/private/project';
+    run.repository.sourceScopeDescription = '/home/user/private/file';
+    run.engines[0].diagnostic = 'read /home/user/private/scanner.log';
+    run.findings[0] = { ...run.findings[0], message: 'found /home/user/private/secret.txt' };
+    const bundlePath = path.join(repository, 'redacted.zip');
+    createBundle(run, path.join(repository, 'run.json'), bundlePath);
+    const bundleBytes = fs.readFileSync(bundlePath).toString('utf8');
+    assert.equal(bundleBytes.includes('/home/user/private'), false);
+    const bundleEntries = readZipEntries(bundlePath);
+    for (const data of bundleEntries.values()) assert.equal(data.toString('utf8').includes('/home/user/private'), false);
+  } finally {
+    cleanup(repository);
+    cleanup(outside);
+  }
+});
+
+test('offline verification rejects forged metadata and unlisted ZIP entries with valid CRCs', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const run = measuredRun({ runId: 'report-run-0005', seed: '1' });
+    const validPath = path.join(repository, 'valid.zip');
+    createBundle(run, path.join(repository, 'run.json'), validPath);
+    assert.equal(verifyBundle(validPath).verified, true);
+    const original = readZipEntries(validPath);
+
+    const forgedManifest = JSON.parse(original.get('manifest.json').toString('utf8'));
+    const forgedInventory = JSON.parse(original.get('inventory.json').toString('utf8'));
+    forgedManifest.contentFiles[0].sha256 = 'a'.repeat(64);
+    forgedInventory.entries[0].sha256 = 'a'.repeat(64);
+    const forgedEntries = [...original.entries()].map(([name, data]) => {
+      if (name === 'manifest.json') return { name, data: Buffer.from(`${JSON.stringify(forgedManifest, null, 2)}\n`) };
+      if (name === 'inventory.json') return { name, data: Buffer.from(`${JSON.stringify(forgedInventory, null, 2)}\n`) };
+      return { name, data };
+    });
+    const forgedPath = path.join(repository, 'forged-metadata.zip');
+    fs.writeFileSync(forgedPath, createZip(forgedEntries));
+    assert.throws(() => verifyBundle(forgedPath), /metadata|actual entry|checksum|integrity/i);
+
+    const extraPath = path.join(repository, 'unlisted-entry.zip');
+    fs.writeFileSync(extraPath, createZip([...original.entries()].map(([name, data]) => ({ name, data })).concat({ name: 'extra.md', data: Buffer.from('not inventoried\n') })));
+    assert.throws(() => verifyBundle(extraPath), /inventoried|entry|extra/i);
   } finally {
     cleanup(repository);
   }
@@ -901,6 +966,213 @@ test('thresholds recommend exposes atypical, absent and inferred category measur
     const categorizedRecommendation = JSON.parse(categorizedResult.stdout);
     assert.deepEqual(new Set(categorizedRecommendation.series.map((series) => series.dimensions.fileCategory)), new Set(['runtime', 'tests', 'configuration', 'generated']));
     assert(categorizedRecommendation.proposals.filter((proposal) => proposal.dimensions.fileCategory === 'generated').every((proposal) => proposal.status === 'EXCLUDED_BY_DEFAULT'));
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('fix --next previews without mutation and an authorized deterministic cycle resolves with redacted proof', async () => {
+  const repository = makeRepository('fix-cycle-fixture');
+  try {
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(repository, 'src', 'fix-target.js'), 'module.exports = "QAK_FIX_ME";\n');
+    initializeGit(repository);
+    const run = measuredRun({
+      runId: 'fix-run-0001',
+      seed: 'e',
+      findings: [{ id: 'fix-target-001', path: 'src/fix-target.js', ruleId: 'unused-export', message: 'deterministic fixture finding', severity: 'MEDIUM' }],
+    });
+    run.findings[0].lifecycle = 'NEW';
+    const plan = buildPlan(run);
+    fs.writeFileSync(path.join(repository, 'plan.json'), `${JSON.stringify(plan, null, 2)}\n`);
+
+    const preview = runCli(repository, ['fix', '--next', 'plan.json']);
+    assert.equal(preview.status, 0, `${preview.stderr}\n${preview.stdout}`);
+    const previewResult = JSON.parse(preview.stdout);
+    assert.equal(previewResult.mode, 'PREVIEW');
+    assert.equal(previewResult.status, 'READY');
+    assert.equal(previewResult.authorization.received, false);
+    assert.equal(fs.readFileSync(path.join(repository, 'src', 'fix-target.js'), 'utf8'), 'module.exports = "QAK_FIX_ME";\n');
+
+    const blocked = runCli(repository, ['fix', '--next', 'plan.json', '--execute', '--agent', 'deterministic']);
+    assert.equal(blocked.status, 2);
+    const blockedResult = JSON.parse(blocked.stdout);
+    assert.equal(blockedResult.status, 'BLOCKED');
+    assert.match(blockedResult.reason, /--approve/);
+    assert.equal(fs.readFileSync(path.join(repository, 'src', 'fix-target.js'), 'utf8'), 'module.exports = "QAK_FIX_ME";\n');
+
+    const next = nextLot(plan);
+    const result = await executeFix({
+      plan,
+      next,
+      root: repository,
+      agentName: 'deterministic',
+      approve: true,
+      adapter: createDeterministicAdapter(),
+      reanalyze: async () => ({ status: 'MEASURED_VERIFIED', sourceRevisionStatus: 'VERIFIED', remainingFindings: [], engines: [{ name: 'knip', measurementStatus: 'MEASURED', sourceRevision: { status: 'VERIFIED', sha: 'e'.repeat(40) } }] }),
+      validate: () => ({ status: 'PASS', validations: [{ name: 'test', status: 'PASS', exitCode: 0 }] }),
+    });
+    assert.equal(result.status, 'RESOLVED');
+    assert.equal(result.authorization.received, true);
+    assert.deepEqual(result.scopeAudit.foreignChanges, []);
+    assert.equal(result.scopeAudit.headChanged, false);
+    assert.equal(fs.readFileSync(path.join(repository, 'src', 'fix-target.js'), 'utf8'), 'module.exports = "QAK_FIXED";\n');
+    assert.equal(verifyFixResult(result).verified, true);
+    assert.doesNotMatch(JSON.stringify(result), /QAK_FIX_ME/);
+    fs.writeFileSync(path.join(repository, 'fix-result.json'), `${JSON.stringify(result, null, 2)}\n`);
+    const verified = runCli(repository, ['verify', 'fix-result.json']);
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.equal(JSON.parse(verified.stdout).verified, true);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('fix refuses to overwrite a pre-existing approved change and verify rejects unverified proof', async () => {
+  const repository = makeRepository('fix-preservation-fixture');
+  try {
+    fs.mkdirSync(path.join(repository, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(repository, 'src', 'fix-target.js'), 'module.exports = "QAK_FIX_ME";\n');
+    initializeGit(repository);
+    const run = measuredRun({ runId: 'fix-run-0002', seed: 'f', findings: [{ id: 'fix-target-002', path: 'src/fix-target.js', message: 'fixture' }] });
+    run.findings[0].lifecycle = 'NEW';
+    const plan = buildPlan(run);
+    fs.writeFileSync(path.join(repository, 'src', 'fix-target.js'), 'module.exports = "human-change";\n');
+    const result = await executeFix({
+      plan,
+      next: nextLot(plan),
+      root: repository,
+      approve: true,
+      adapter: createDeterministicAdapter(),
+      reanalyze: async () => ({ status: 'MEASURED_VERIFIED' }),
+      validate: () => ({ status: 'PASS', validations: [] }),
+    });
+    assert.equal(result.status, 'BLOCKED');
+    assert.match(result.reason, /pre-existing changes/);
+    assert.equal(fs.readFileSync(path.join(repository, 'src', 'fix-target.js'), 'utf8'), 'module.exports = "human-change";\n');
+    assert.equal(verifyFixResult({ ...result, mode: 'EXECUTION' }).verified, false);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('fix status classification never conflates failed, blocked or unverified evidence with resolution', () => {
+  const execution = { status: 'COMPLETED' };
+  const scope = { clean: true, headChanged: false, allowedChanges: ['src/file.js'] };
+  const passing = { status: 'PASS' };
+  assert.equal(classifyExecution({ status: 'FAILED' }, scope, { status: 'MEASURED_VERIFIED' }, passing), 'FAILED');
+  assert.equal(classifyExecution(execution, scope, { status: 'BLOCKED' }, passing), 'BLOCKED');
+  assert.equal(classifyExecution(execution, scope, { status: 'FINDINGS_REMAIN' }, passing), 'FAILED');
+  assert.equal(classifyExecution(execution, scope, { status: 'MEASURED_UNVERIFIED' }, passing), 'UNVERIFIED');
+  assert.equal(classifyExecution(execution, scope, { status: 'MEASURED_VERIFIED' }, { status: 'NOT_RUN' }), 'UNVERIFIED');
+  assert.equal(classifyExecution(execution, scope, { status: 'MEASURED_VERIFIED' }, passing), 'RESOLVED');
+  assert.equal(classifyExecution(execution, { ...scope, clean: false, foreignChanges: [{ path: 'other.js' }] }, { status: 'MEASURED_VERIFIED' }, passing), 'FAILED');
+});
+
+test('SARIF 2.1.0 import and export preserve canonical fields and diagnostics', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const fixture = path.join(ROOT, 'test', 'fixtures', 'sample.sarif');
+    const imported = importSarifFile(repository, fixture);
+    assert.equal(imported.engine.name, 'sarif');
+    assert.equal(imported.engine.sourceRevision.status, 'UNVERIFIED');
+    assert.equal(imported.findings.length, 2);
+    assert.equal(imported.findings[0].path, 'src/app.js');
+    assert.equal(imported.findings[0].lifecycle, 'UNCLASSIFIED');
+    assert.equal(imported.findings[0].provenance.sourceRevision.sha, 'a'.repeat(40));
+    assert.ok(imported.diagnostics.some((item) => item.code === 'FIELD_NOT_REPRESENTABLE'));
+    assert.ok(imported.diagnostics.some((item) => item.code === 'LOCATION_NOT_REPRESENTABLE'));
+    const run = {
+      schemaVersion: '0.1-draft',
+      runId: 'sarif-run-0001',
+      repository: { name: 'sarif-fixture' },
+      inputScope: 'WORKTREE_LIVE',
+      reproducible: false,
+      engines: [imported.engine],
+      findings: imported.findings,
+      diagnostics: imported.diagnostics,
+    };
+    validateRun(run);
+    const exported = buildSarif(run);
+    assert.equal(exported.version, '2.1.0');
+    assert.equal(exported.runs[0].results.length, 2);
+    assert.equal(exported.runs[0].results[0].properties.qakLifecycle, 'UNCLASSIFIED');
+    assert.equal(exported.runs[0].properties.qakRunId, 'sarif-run-0001');
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('scan and report expose SARIF connector without requiring an account', () => {
+  const repository = makeRepository('sarif-cli-fixture');
+  try {
+    const fixture = path.join(ROOT, 'test', 'fixtures', 'sample.sarif');
+    const scan = runCli(repository, ['scan', '--sarif-report', fixture, '--output', 'sarif-run.json']);
+    assert.equal(scan.status, 0, `${scan.stderr}\n${scan.stdout}`);
+    const run = JSON.parse(fs.readFileSync(path.join(repository, 'sarif-run.json'), 'utf8'));
+    assert.equal(run.engines.find((engine) => engine.name === 'sarif').measurementStatus, 'MEASURED');
+    const report = runCli(repository, ['report', 'sarif-run.json', '--format', 'sarif', '--output', 'exported.sarif']);
+    assert.equal(report.status, 0, report.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(repository, 'exported.sarif'), 'utf8')).version, '2.1.0');
+    const imported = runCli(repository, ['import', 'sarif', fixture, '--output', 'imported-run.json']);
+    assert.equal(imported.status, 0, imported.stderr);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(repository, 'imported-run.json'), 'utf8')).engines[0].name, 'sarif');
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('SonarQube connector detects version, paginates and keeps analysis revision separate from HEAD', async () => {
+  const repository = makeRepository('sonar-fixture');
+  try {
+    const calls = [];
+    const request = async ({ pathname, query, headers }) => {
+      calls.push({ pathname, query, headers });
+      if (pathname === '/api/server/version') return { status: 200, body: '10.6.0.92116' };
+      if (pathname === '/api/issues/search') {
+        const page = Number(query.p);
+        return { status: 200, body: JSON.stringify({ paging: { total: 3, pageIndex: page, pageSize: Number(query.ps) }, issues: page === 1 ? [
+          { key: 'ISSUE-1', rule: 'js:Rule', severity: 'MAJOR', component: 'sonar-fixture:src/a.js', line: 3, message: 'First issue' },
+          { key: 'ISSUE-2', rule: 'js:Rule', severity: 'MINOR', component: 'sonar-fixture:src/b.js', textRange: { startLine: 4 }, message: 'Second issue' },
+        ] : [{ key: 'ISSUE-3', rule: 'js:Rule', severity: 'INFO', component: 'sonar-fixture:src/c.js', message: 'Third issue', flows: [{ locations: [] }] }] }) };
+      }
+      if (pathname === '/api/project_analyses/search') return { status: 200, body: JSON.stringify({ analyses: [{ key: 'analysis-1', revision: 'b'.repeat(40), date: '2026-10-24T12:00:00+0000' }] }) };
+      throw new Error(`unexpected endpoint ${pathname}`);
+    };
+    const connected = await connectSonar({ root: repository, url: 'https://sonar.example.invalid', project: 'sonar-fixture', tokenEnv: 'QAK_TEST_TOKEN', env: { QAK_TEST_TOKEN: 'secret-token-value' }, request });
+    assert.equal(connected.status, 'CONNECTED');
+    assert.equal(connected.version, '10.6.0.92116');
+    assert.equal(connected.tokenSource, 'environment:QAK_TEST_TOKEN');
+    const imported = await importSonar(repository, { url: 'https://sonar.example.invalid', project: 'sonar-fixture', branch: 'main', tokenEnv: 'QAK_TEST_TOKEN', env: { QAK_TEST_TOKEN: 'secret-token-value' }, request });
+    assert.equal(imported.status, 'MEASURED');
+    assert.equal(imported.findings.length, 3);
+    assert.equal(imported.engine.sourceRevision.sha, 'b'.repeat(40));
+    assert.equal(imported.engine.sourceRevision.status, 'UNVERIFIED');
+    assert.ok(imported.diagnostics.some((item) => item.code === 'FIELD_NOT_REPRESENTABLE'));
+    assert.equal(calls.filter((call) => call.pathname === '/api/issues/search').length, 2);
+    assert.equal(calls.find((call) => call.pathname === '/api/issues/search').query.branch, 'main');
+    assert.equal(calls.find((call) => call.pathname === '/api/issues/search').headers.authorization, 'Bearer secret-token-value');
+    assert.equal(imported.findings.some((finding) => finding.provenance.sourceRevision.sha === 'a'.repeat(40)), false);
+    assert.equal(imported.findings.every((finding) => !String(finding.message).includes('secret-token-value')), true);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('SonarQube connector preserves limits and permission errors without claiming clean', async () => {
+  const repository = makeEmptyRepository();
+  try {
+    const request = async ({ pathname }) => {
+      if (pathname === '/api/server/version') return { status: 200, body: '9.9.0' };
+      if (pathname === '/api/issues/search') return { status: 200, body: JSON.stringify({ paging: { total: 3 }, issues: [{ key: '1', rule: 'x', component: 'p:a.js', message: 'one' }, { key: '2', rule: 'x', component: 'p:b.js', message: 'two' }] }) };
+      if (pathname === '/api/project_analyses/search') return { status: 200, body: JSON.stringify({ analyses: [] }) };
+      throw new Error('unexpected');
+    };
+    const partial = await importSonar(repository, { url: 'https://sonar.example.invalid', project: 'p', maxResults: 2, request });
+    assert.equal(partial.status, 'PARTIAL');
+    assert.equal(partial.engine.measurementStatus, 'PARTIAL');
+    assert.ok(partial.diagnostics.some((item) => item.code === 'RESULT_LIMIT_REACHED'));
+    await assert.rejects(() => importSonar(repository, { url: 'https://sonar.example.invalid', project: 'p', request: async ({ pathname }) => pathname === '/api/server/version' ? { status: 200, body: '10.0' } : { status: 403, body: '{"errors":[{"msg":"Insufficient permissions"}]}' } }), /HTTP 403/);
   } finally {
     cleanup(repository);
   }

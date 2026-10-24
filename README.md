@@ -33,7 +33,7 @@ A quality scan answers what an analyzer found. A maintenance workflow also needs
 | Deterministic correction planning | MVP | Implemented locally, experimental |
 | Explainable threshold recommendations | MVP | Implemented locally, advisory |
 | npm CLI | After MVP verification | Local package prototype; not published |
-| GitHub Actions and SARIF export | Later | Not implemented |
+| Local SARIF 2.1.0 import/export and optional SonarQube connector | Implemented | Opt-in; no account required by other commands |
 | Dependency graph and architectural radar | Later | Not implemented |
 
 ## Intended workflow
@@ -65,11 +65,18 @@ node bin/quality-audit-kit.js triage run.json --baseline quality-audit-kit.basel
 node bin/quality-audit-kit.js report run.json
 node bin/quality-audit-kit.js report run.json --format markdown --output report.md
 node bin/quality-audit-kit.js report run.json --format json --output report.json
+node bin/quality-audit-kit.js scan /path/to/repository --sarif-report report.sarif --output run.json
+node bin/quality-audit-kit.js report run.json --format sarif --output report.sarif
+node bin/quality-audit-kit.js connect sonar --sonar-url https://sonar.example --sonar-project project-key
+node bin/quality-audit-kit.js import sonar /path/to/repository --sonar-url https://sonar.example --sonar-project project-key --sonar-token-env SONAR_TOKEN --output sonar-run.json
 node bin/quality-audit-kit.js report run.json --format zip --output quality-audit-kit-run.zip
 node bin/quality-audit-kit.js report --verify-bundle quality-audit-kit-run.zip
 node bin/quality-audit-kit.js plan run.json --output quality-audit-kit.plan.json
 node bin/quality-audit-kit.js plan --next quality-audit-kit.plan.json
 node bin/quality-audit-kit.js plan --export quality-audit-kit.plan.json --output codex-prompts
+node bin/quality-audit-kit.js fix --next quality-audit-kit.plan.json
+node bin/quality-audit-kit.js fix --next quality-audit-kit.plan.json --execute --approve --output fix-result.json
+node bin/quality-audit-kit.js verify fix-result.json
 node bin/quality-audit-kit.js thresholds recommend run.json --output threshold-recommendations.json --export proposed-thresholds.json
 # Normative mutation requires an explicit approval flag:
 node bin/quality-audit-kit.js thresholds recommend run.json --apply --approve --profile balanced
@@ -79,9 +86,13 @@ node bin/quality-audit-kit.js thresholds recommend run.json --apply --approve --
 
 `report` emits a readable terminal summary by default, deterministic Markdown or structured JSON on request, and an optional offline ZIP with `manifest.json`, `inventory.json`, `checksums.sha256` and an offline verification command. It never computes a global quality score, refuses output overwrites, and bundles only normalized evidence plus explicitly authorized non-source evidence files.
 
+SARIF 2.1.0 import/export is local and does not require an account. SonarQube is an optional official-Web-API connector: it detects the server version, imports paginated issues and analysis metadata with a bounded limit, and keeps the Sonar analysis revision separate from the local Git context SHA. Tokens are read from an environment variable or a file outside the analyzed repository and are never written to runs, logs or offline bundles. Other commands remain usable without SonarQube or any external account.
+
 `plan` creates deterministic correction lots and autonomous Codex prompts from one run. It orders security confirmations, regressions, broken contracts, structural causes, actionable debt and secondary improvements with an explicit rule based on category, severity, confidence, finding count, known consumers, change risk, cost and stable lot ID; it does not calculate an opaque score. Common-cause grouping requires explicit evidence. `plan --next` selects only a safe next lot, while `plan --export` writes one prompt per lot. Uncertain findings, stale decisions, incomplete measurements, unsupported relations and dependency cycles remain visible and can block selection.
 
 `thresholds recommend` is a local, advisory policy counselor. It separates current measurements, recommended objectives and historical ratchet caps by metric, language, workspace and file category, and reports distributions, quantiles, extremes, exceedances, findings affected, confidence and application consequences. Progressive, balanced and strict profiles use explainable median/low-quantile/extreme rules; high quantiles are descriptive and are never promoted automatically from a degraded repository. Generated files, failed or unavailable scanners and insufficient samples remain excluded or explicitly uncertain. `--export` writes an approval-required proposal; only `--apply --approve` can modify normative configuration. No global quality score is computed.
+
+`fix --next` presents the next bounded correction lot without mutation. Agent execution is opt-in through `--execute --approve`; the default adapter invokes a locally installed Codex CLI in an ephemeral workspace-write session, while a minimal command adapter remains available for other local agents. The workflow protects pre-existing approved files, audits all changed paths, refuses commits/pushes/deletions/baseline changes, re-runs the targeted scanners and safe validations, and records only redacted evidence. `verify` checks that evidence without executing an agent. This remains an experimental local workflow, not an operational autonomous repair service.
 
 ## Read the project
 

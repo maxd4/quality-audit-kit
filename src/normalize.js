@@ -1,7 +1,7 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
 
-const MEASUREMENT_STATUSES = ['MEASURED', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY'];
+const MEASUREMENT_STATUSES = ['MEASURED', 'PARTIAL', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY'];
 const LIFECYCLE_STATUSES = ['UNCLASSIFIED', 'NEW', 'HISTORICAL_ACTIONABLE', 'HISTORICAL_JUSTIFIED', 'RESOLVED', 'REINTRODUCED'];
 const SEVERITIES = ['INFO', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 
@@ -30,6 +30,13 @@ function severity(value, fallback = 'INFO') {
   return fallback;
 }
 
+function redactMessage(value) {
+  return String(value || '')
+    .replace(/\b(?:ghp_|github_pat_|sk-|rk-|xox[baprs]-)[A-Za-z0-9_-]{8,}\b/gi, '[REDACTED_TOKEN]')
+    .replace(/\bBearer\s+[A-Za-z0-9._-]{12,}/gi, 'Bearer [REDACTED_TOKEN]')
+    .replace(/\b(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*["']?[^\s,"']+/gi, '$1=[REDACTED_SECRET]');
+}
+
 function getLine(item) {
   return Number(item?.line || item?.startLine || item?.location?.start?.line || item?.loc?.start?.line) || undefined;
 }
@@ -42,7 +49,7 @@ function itemMessage(item, ruleId, filePath, symbol) {
   return String(item?.message || item?.description || `${ruleId}${symbol ? `: ${symbol}` : ''}${filePath ? ` (${filePath})` : ''}`);
 }
 
-function createFinding({ root, engine, ruleId, path: candidatePath, line, severityValue, message, locus, provenance }) {
+function createFinding({ root, engine, ruleId, path: candidatePath, line, severityValue, message, locus, provenance, rawReference, measurementStatus = 'MEASURED' }) {
   const filePath = safeRelativePath(root, candidatePath);
   const normalizedLocus = String(locus || message || filePath).trim();
   return {
@@ -52,11 +59,79 @@ function createFinding({ root, engine, ruleId, path: candidatePath, line, severi
     path: filePath,
     ...(line ? { line } : {}),
     severity: severity(severityValue),
-    message: message || `${ruleId} reported for ${filePath}`,
+    message: redactMessage(message || `${ruleId} reported for ${filePath}`),
     lifecycle: 'UNCLASSIFIED',
-    measurementStatus: 'MEASURED',
+    measurementStatus,
     provenance,
+    ...(rawReference ? { rawReference: String(rawReference) } : {}),
   };
+}
+
+function sarifMessage(result) {
+  const message = result?.message;
+  if (typeof message === 'string') return message;
+  if (message && typeof message.text === 'string') return message.text;
+  if (message && typeof message.markdown === 'string') return message.markdown;
+  return '';
+}
+
+function sarifPath(result) {
+  const physical = result?.locations?.[0]?.physicalLocation;
+  const uri = physical?.artifactLocation?.uri;
+  if (!uri || /^[a-z][a-z0-9+.-]*:\/\//i.test(String(uri)) && !/^file:\/\//i.test(String(uri))) return undefined;
+  if (/^file:\/\//i.test(String(uri))) {
+    try { return decodeURIComponent(new URL(String(uri)).pathname.replace(/^\/[A-Za-z]:/, (value) => value.slice(1))); } catch { return undefined; }
+  }
+  try { return decodeURIComponent(String(uri)); } catch { return String(uri); }
+}
+
+function sarifRevision(run) {
+  const revision = run?.versionControlProvenance?.[0]?.revisionId;
+  if (/^[a-f0-9]{40}$/i.test(String(revision || ''))) {
+    return { status: 'UNVERIFIED', sha: String(revision).toLowerCase(), basis: 'SARIF declared revisionId; the imported document does not prove that the local repository content matches it.' };
+  }
+  return { status: 'UNKNOWN', sha: null, basis: 'SARIF did not provide a demonstrable 40-character source revision.' };
+}
+
+function normalizeSarif(root, log, provenance = {}) {
+  if (!log || typeof log !== 'object' || log.version !== '2.1.0' || !Array.isArray(log.runs)) throw new Error('SARIF input must be a SARIF 2.1.0 object with a runs array.');
+  const findings = [];
+  const diagnostics = [];
+  for (const [runIndex, run] of log.runs.entries()) {
+    const driver = run?.tool?.driver || {};
+    const engine = String(provenance.engine || driver.name || driver.guid || 'sarif');
+    const sourceRevision = provenance.sourceRevision || sarifRevision(run);
+    const rules = Array.isArray(driver.rules) ? driver.rules : [];
+    const results = Array.isArray(run?.results) ? run.results : [];
+    if (run?.results === null) diagnostics.push({ kind: 'SARIF_DIAGNOSTIC', code: 'NULL_RESULTS', reference: `sarif://runs/${runIndex}`, message: 'SARIF marks this run result set as unavailable; no clean result is inferred.' });
+    if (run?.results === undefined) diagnostics.push({ kind: 'SARIF_DIAGNOSTIC', code: 'MISSING_RESULTS', reference: `sarif://runs/${runIndex}`, message: 'SARIF run has no results property; completeness is unverified.' });
+    for (const [resultIndex, result] of results.entries()) {
+      const rule = result?.ruleId || (Number.isInteger(result?.ruleIndex) ? rules[result.ruleIndex]?.id : null) || 'sarif-result';
+      const filePath = sarifPath(result);
+      const physical = result?.locations?.[0]?.physicalLocation;
+      const line = Number(physical?.region?.startLine) || undefined;
+      const message = sarifMessage(result) || `${rule} reported by ${engine}`;
+      const reference = `sarif://runs/${runIndex}/results/${resultIndex}`;
+      if (!filePath) diagnostics.push({ kind: 'SARIF_DIAGNOSTIC', code: 'LOCATION_NOT_REPRESENTABLE', reference, message: 'SARIF result has no repository-relative file URI; the finding is retained with an external placeholder path.' });
+      for (const field of ['codeFlows', 'graphs', 'graphTraversals', 'stacks', 'relatedLocations', 'fixes']) {
+        if (result?.[field] !== undefined) diagnostics.push({ kind: 'SARIF_DIAGNOSTIC', code: 'FIELD_NOT_REPRESENTABLE', reference, message: `SARIF ${field} was not copied into the canonical finding.`, details: { field, count: Array.isArray(result[field]) ? result[field].length : 1 } });
+      }
+      const finding = createFinding({
+        root,
+        engine,
+        ruleId: String(rule),
+        path: filePath || `external/sarif-${runIndex}-${resultIndex}`,
+        line,
+        severityValue: result?.properties?.severity || result?.level,
+        message,
+        locus: result?.guid || result?.correlationGuid || result?.fingerprints?.['qak/v1'] || message,
+        provenance: { kind: provenance.kind || 'REPORT', reference: provenance.reference || reference, sourceRevision },
+        rawReference: reference,
+      });
+      findings.push(finding);
+    }
+  }
+  return { findings, diagnostics };
 }
 
 function issueArrays(report) {
@@ -173,12 +248,46 @@ function normalizeJscpd(root, report, provenance) {
   });
 }
 
+function normalizeSonar(root, issues, provenance) {
+  if (!Array.isArray(issues)) throw new Error('SonarQube issues must be an array.');
+  const diagnostics = [];
+  const findings = [];
+  const severityMap = { BLOCKER: 'CRITICAL', CRITICAL: 'CRITICAL', MAJOR: 'HIGH', MINOR: 'MEDIUM', INFO: 'INFO' };
+  for (const [index, issue] of issues.entries()) {
+    const reference = `sonarqube://issues/${encodeURIComponent(String(issue?.key || index))}`;
+    const component = String(issue?.component || '');
+    const separator = component.indexOf(':');
+    const candidatePath = separator >= 0 ? component.slice(separator + 1) : component;
+    if (!candidatePath) diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'LOCATION_NOT_REPRESENTABLE', reference, message: 'SonarQube issue has no component path; a safe placeholder path was used.' });
+    for (const field of ['flows', 'locations', 'quickFixAvailable', 'cleanCodeAttribute', 'impacts', 'effort', 'debt', 'tags', 'textRange']) {
+      if (issue?.[field] !== undefined && ['flows', 'locations', 'impacts'].includes(field)) diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'FIELD_NOT_REPRESENTABLE', reference, message: `SonarQube ${field} metadata was not copied into the canonical finding.`, details: { field, count: Array.isArray(issue[field]) ? issue[field].length : 1 } });
+    }
+    const line = Number(issue?.line || issue?.textRange?.startLine) || undefined;
+    findings.push(createFinding({
+      root,
+      engine: 'sonarqube',
+      ruleId: String(issue?.rule || issue?.type || 'sonar-issue'),
+      path: candidatePath || `external/sonarqube-${index}`,
+      line,
+      severityValue: severityMap[String(issue?.severity || '').toUpperCase()] || issue?.severity,
+      message: String(issue?.message || issue?.rule || 'SonarQube issue'),
+      locus: issue?.key || `${issue?.rule || 'sonar-issue'}:${issue?.message || index}`,
+      provenance,
+      rawReference: reference,
+      measurementStatus: provenance.measurementStatus || 'MEASURED',
+    }));
+  }
+  return { findings, diagnostics };
+}
+
 module.exports = {
   LIFECYCLE_STATUSES,
   MEASUREMENT_STATUSES,
   createFinding,
   normalizeJscpd,
   normalizeKnip,
+  normalizeSarif,
+  normalizeSonar,
   safeRelativePath,
   stableId,
 };

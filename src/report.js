@@ -4,7 +4,7 @@ const path = require('node:path');
 const zlib = require('node:zlib');
 
 const SHA_PATTERN = /^[a-f0-9]{40}$/i;
-const MEASUREMENT_STATUSES = new Set(['MEASURED', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY']);
+const MEASUREMENT_STATUSES = new Set(['MEASURED', 'PARTIAL', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY']);
 const SOURCE_STATUSES = new Set(['VERIFIED', 'UNVERIFIED', 'UNKNOWN']);
 const SAFE_EVIDENCE_EXTENSIONS = new Set(['.json', '.md', '.txt', '.log', '.sarif', '.xml']);
 const SOURCE_EXTENSIONS = new Set([
@@ -24,6 +24,7 @@ function sanitizeString(value) {
   text = text.replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[REDACTED_KEY]');
   text = text.replace(/\b(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*["']?[^\s,"']+/gi, (match) => `${match.split(/[:=]/, 1)[0]}=[REDACTED_SECRET]`);
   text = text.replace(/(?:[A-Za-z]:[\\/][^\r\n"'`<>|;]*|\\\\[^\r\n"'`<>|;]+)/g, '[REDACTED_PATH]');
+  text = text.replace(/(^|[\s"'(=:])\/(?:[^\/\s"'`<>|]+\/)+[^\/\s"'`<>|]+/g, '$1[REDACTED_PATH]');
   return text;
 }
 
@@ -73,6 +74,7 @@ function validateRun(run) {
 function validationState(engine) {
   const source = sourceRevisionOf(engine);
   if (engine.measurementStatus === 'FAILURE') return 'FAILED';
+  if (engine.measurementStatus === 'PARTIAL') return 'MEASURED_UNVERIFIED';
   if (engine.measurementStatus === 'NOT_MEASURED') return 'NOT_MEASURED';
   if (engine.measurementStatus === 'SKIPPED_BY_POLICY') return 'SKIPPED';
   if (source.status === 'VERIFIED') return 'VALIDATED';
@@ -132,6 +134,7 @@ function buildStructuredReport(inputRun) {
     findings: buckets,
     measurementFailures: failures,
     recommendations: buildRecommendations(run, buckets, failures),
+    ...(Array.isArray(run.diagnostics) && run.diagnostics.length ? { diagnostics: run.diagnostics } : {}),
     ...(run.comparison ? { comparison: run.comparison } : {}),
     ...(run.qualityGate ? { qualityGate: run.qualityGate } : {}),
   };
@@ -176,6 +179,7 @@ function renderMarkdown(run) {
   lines.push('## Measurement failures', '');
   if (!report.measurementFailures.length) lines.push('None recorded.', '');
   else for (const failure of report.measurementFailures) lines.push(`- **${cell(failure.engine)}**: ${cell(failure.measurementStatus)} / ${cell(failure.validationState)} — ${cell(failure.diagnostic || 'No diagnostic recorded.')}`);
+  if (report.diagnostics?.length) lines.push('', '## Connector diagnostics', '', ...report.diagnostics.map((diagnostic) => `- **${cell(diagnostic.code || diagnostic.kind)}**: ${cell(diagnostic.message)}`), '');
   lines.push('', '## Recommendations', '', ...report.recommendations.map((item) => `- ${cell(item)}`), '');
   return `${lines.join('\n')}\n`;
 }
@@ -192,6 +196,7 @@ function renderTerminal(run) {
   lines.push('', 'Measurement failures', '--------------------');
   if (!report.measurementFailures.length) lines.push('None recorded.');
   else for (const failure of report.measurementFailures) lines.push(`${failure.engine}: ${failure.measurementStatus} / ${failure.validationState} — ${failure.diagnostic || 'No diagnostic recorded.'}`);
+  if (report.diagnostics?.length) for (const diagnostic of report.diagnostics) lines.push(`Connector diagnostic: ${diagnostic.code || diagnostic.kind} — ${diagnostic.message}`);
   lines.push('', 'Recommendations', '---------------', ...report.recommendations.map((item) => `- ${item}`));
   return `${lines.join('\n')}\n`;
 }
@@ -307,39 +312,129 @@ function parseChecksums(text) {
   });
 }
 
+function contentMetadata(value, source) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${source} contains an invalid content entry.`);
+  const keys = Object.keys(value).sort();
+  if (JSON.stringify(keys) !== JSON.stringify(['authorized', 'bytes', 'path', 'sha256'])) throw new Error(`${source} contains unexpected content metadata.`);
+  if (typeof value.path !== 'string' || !value.path) throw new Error(`${source} contains an unsafe content path.`);
+  try { validateZipName(value.path); } catch { throw new Error(`${source} contains an unsafe content path.`); }
+  if (!/^[a-f0-9]{64}$/i.test(String(value.sha256 || ''))) throw new Error(`${source} contains an invalid SHA-256.`);
+  if (!Number.isInteger(value.bytes) || value.bytes < 0) throw new Error(`${source} contains an invalid byte count.`);
+  if (typeof value.authorized !== 'boolean') throw new Error(`${source} contains an invalid authorization flag.`);
+  return { path: value.path, bytes: value.bytes, sha256: value.sha256.toLowerCase(), authorized: value.authorized };
+}
+
+function sortedMetadata(entries) {
+  return entries.map((entry) => contentMetadata(entry, 'Bundle content metadata')).sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function samePath(left, right) {
+  const normalize = (value) => path.normalize(value);
+  if (process.platform === 'win32') return normalize(left).toLowerCase() === normalize(right).toLowerCase();
+  return normalize(left) === normalize(right);
+}
+
 function verifyBundle(bundlePath) {
   const entries = readZipEntries(bundlePath);
-  for (const required of ['manifest.json', 'inventory.json', 'checksums.sha256', 'run.json', 'report.json', 'report.md', 'summary.txt', 'VERIFY.txt']) if (!entries.has(required)) throw new Error(`Bundle is missing ${required}.`);
+  const fixedEntries = ['manifest.json', 'inventory.json', 'checksums.sha256', 'run.json', 'report.json', 'report.md', 'summary.txt', 'VERIFY.txt'];
+  for (const required of fixedEntries) if (!entries.has(required)) throw new Error(`Bundle is missing ${required}.`);
   const manifest = JSON.parse(entries.get('manifest.json').toString('utf8')), inventory = JSON.parse(entries.get('inventory.json').toString('utf8')), run = JSON.parse(entries.get('run.json').toString('utf8'));
   validateRun(run);
+  if (!manifest || typeof manifest !== 'object' || !Array.isArray(manifest.contentFiles) || manifest.inventory !== 'inventory.json' || manifest.checksums !== 'checksums.sha256') throw new Error('Bundle manifest is incomplete or inconsistent.');
+  if (!inventory || typeof inventory !== 'object' || !Array.isArray(inventory.entries)) throw new Error('Bundle inventory is incomplete or inconsistent.');
   if (manifest.runId !== run.runId || inventory.runId !== run.runId) throw new Error('Bundle manifest, inventory and runId do not agree.');
   const expectedContextSha = run.repository.contextCommitSha || run.repository.commitSha || null;
   if ((manifest.contextSha || null) !== expectedContextSha) throw new Error('Bundle manifest context SHA does not agree with run.json.');
+  const manifestItems = sortedMetadata(manifest.contentFiles);
+  const inventoryItems = sortedMetadata(inventory.entries);
+  if (JSON.stringify(manifestItems) !== JSON.stringify(inventoryItems)) throw new Error('Bundle manifest and inventory metadata do not agree.');
+  const contentPaths = new Set();
+  for (const item of manifestItems) {
+    if (contentPaths.has(item.path)) throw new Error(`Bundle content inventory contains a duplicate path: ${item.path}`);
+    contentPaths.add(item.path);
+  }
   const checksums = parseChecksums(entries.get('checksums.sha256').toString('utf8')), listed = new Set();
   for (const checksum of checksums) {
-    if (listed.has(checksum.path) || !entries.has(checksum.path)) throw new Error(`Bundle checksum references a missing or duplicate path: ${checksum.path}`);
+    try { validateZipName(checksum.path); } catch { throw new Error(`Bundle checksum references an unsafe path: ${checksum.path}`); }
+    if (listed.has(checksum.path) || !entries.has(checksum.path) || !contentPaths.has(checksum.path)) throw new Error(`Bundle checksum references a missing, duplicate or unlisted path: ${checksum.path}`);
     listed.add(checksum.path);
     if (sha256(entries.get(checksum.path)) !== checksum.sha256) throw new Error(`Bundle checksum mismatch: ${checksum.path}`);
   }
-  const manifestPaths = (manifest.contentFiles || []).map((item) => item.path).sort(), checksumPaths = [...listed].sort();
+  const manifestPaths = manifestItems.map((item) => item.path), checksumPaths = [...listed].sort((left, right) => left.localeCompare(right));
   if (JSON.stringify(manifestPaths) !== JSON.stringify(checksumPaths)) throw new Error('Bundle manifest and checksums inventory do not agree.');
-  const inventoryPaths = (inventory.entries || []).map((item) => item.path).sort();
-  if (JSON.stringify(manifestPaths) !== JSON.stringify(inventoryPaths)) throw new Error('Bundle manifest and inventory do not agree.');
-  for (const item of inventory.entries || []) {
-    const manifestItem = (manifest.contentFiles || []).find((candidate) => candidate.path === item.path);
-    if (!manifestItem || item.sha256 !== manifestItem.sha256 || item.bytes !== manifestItem.bytes) throw new Error(`Bundle inventory entry is inconsistent: ${item.path}`);
+  const expectedZipPaths = new Set([...fixedEntries, ...contentPaths]);
+  const actualZipPaths = new Set(entries.keys());
+  if (actualZipPaths.size !== expectedZipPaths.size || [...actualZipPaths].some((entry) => !expectedZipPaths.has(entry))) throw new Error('Bundle contains an entry that is not fully inventoried.');
+  for (const item of manifestItems) {
+    const data = entries.get(item.path);
+    if (!data || data.length !== item.bytes || sha256(data) !== item.sha256) throw new Error(`Bundle content metadata does not match the actual entry: ${item.path}`);
   }
   return { verified: true, runId: run.runId, contextSha: expectedContextSha, entries: [...entries.keys()].sort(), checksums: checksums.length };
 }
 
 function evidenceList(options) { const value = options['include-evidence'] ?? options.evidence; if (value === undefined || value === true || value === '') return []; return String(value).split(',').map((item) => item.trim()).filter(Boolean); }
 
+function isInside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return Boolean(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function evidenceLabel(root, selected) {
+  const absolute = path.resolve(root, String(selected));
+  const relative = path.relative(path.resolve(root), absolute);
+  return relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+    ? relative.split(path.sep).join('/')
+    : '<outside-authorized-directory>';
+}
+
+function realPath(candidate) {
+  const resolver = fs.realpathSync.native || fs.realpathSync;
+  return resolver(candidate);
+}
+
+function sameFileSnapshot(left, right) {
+  return left.isFile() && right.isFile()
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && (!left.dev || !right.dev || left.dev === right.dev)
+    && (!left.ino || !right.ino || left.ino === right.ino);
+}
+
 function evidenceEntry(root, selected) {
-  const absolute = path.resolve(root, selected), relative = path.relative(root, absolute);
-  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error(`Evidence must remain inside the run directory: ${selected}`);
+  const resolvedRoot = path.resolve(root);
+  const absolute = path.resolve(resolvedRoot, selected);
+  const relative = path.relative(resolvedRoot, absolute);
+  if (!isInside(resolvedRoot, absolute)) throw new Error(`Evidence must remain inside the run directory: ${evidenceLabel(root, selected)}`);
+  let effectiveRoot;
+  let effectiveFile;
+  try {
+    effectiveRoot = realPath(resolvedRoot);
+    effectiveFile = realPath(absolute);
+  } catch {
+    throw new Error(`Evidence file could not be resolved safely: ${evidenceLabel(root, selected)}`);
+  }
+  if (!isInside(effectiveRoot, effectiveFile)) throw new Error(`Evidence destination escapes the authorized run directory: ${evidenceLabel(root, selected)}`);
   const normalized = relative.split(path.sep).join('/'), extension = path.extname(normalized).toLowerCase(), lowerName = normalized.toLowerCase();
-  if (!SAFE_EVIDENCE_EXTENSIONS.has(extension) || SOURCE_EXTENSIONS.has(extension) || /(?:\.env|secret|token|credential|password|private|id_rsa)/i.test(lowerName)) throw new Error(`Evidence file is not an approved non-source artifact: ${selected}`);
-  const data = fs.readFileSync(absolute);
+  if (!SAFE_EVIDENCE_EXTENSIONS.has(extension) || SOURCE_EXTENSIONS.has(extension) || /(?:\.env|secret|token|credential|password|private|id_rsa)/i.test(lowerName)) throw new Error(`Evidence file is not an approved non-source artifact: ${evidenceLabel(root, selected)}`);
+  let fd;
+  let data;
+  try {
+    fd = fs.openSync(absolute, 'r');
+    const before = fs.fstatSync(fd);
+    if (!before.isFile()) throw new Error('Evidence path is not a regular file.');
+    const openedFile = realPath(absolute);
+    if (!samePath(openedFile, effectiveFile) || !isInside(effectiveRoot, openedFile)) throw new Error('Evidence path changed while it was being opened.');
+    data = fs.readFileSync(fd);
+    const after = fs.fstatSync(fd);
+    if (!sameFileSnapshot(before, after)) throw new Error('Evidence file changed while it was being read.');
+    const finalFile = realPath(absolute);
+    const finalPathStat = fs.statSync(absolute);
+    if (!samePath(finalFile, effectiveFile) || !isInside(effectiveRoot, finalFile) || !sameFileSnapshot(after, finalPathStat)) throw new Error('Evidence path changed before it could be safely included.');
+  } catch (error) {
+    throw new Error(`Evidence file could not be read safely: ${error.message}`);
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+  }
   if (data.includes(0)) throw new Error(`Evidence file is binary and was refused: ${selected}`);
   const text = sanitizeString(data.toString('utf8'));
   if (text.includes('[REDACTED_TOKEN]') || text.includes('[REDACTED_KEY]') || text.includes('[REDACTED_SECRET]')) throw new Error(`Evidence file contains a sensitive token or secret: ${selected}`);

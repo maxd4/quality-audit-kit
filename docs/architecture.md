@@ -11,7 +11,7 @@ quality-audit-kit/
     core/                   # findings, evidence, baselines, triage, policies
     cli/                    # argument parsing and orchestration
     adapters/               # knip, jscpd, eslint, others as demand proves
-    reporters/              # JSON, Markdown, offline; later SARIF
+    reporters/              # JSON, Markdown, offline and SARIF
   examples/
   schemas/
   docs/
@@ -53,5 +53,5 @@ Engine state and policy outcome are orthogonal: `SKIPPED_BY_POLICY` cannot be tr
 - A persistent central service or database.
 - Hosted dashboards or agent-driven code modification.
 - Mandatory Git hooks or PR mutation.
-- SARIF until a compliant mapping is demonstrated.
+- hosted publication and dashboards; SARIF is local-first and optional, and SonarQube remains an API connector rather than a scanner or server.
 - Multi-language claim until at least two different ecosystems are tested.
