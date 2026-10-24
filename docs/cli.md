@@ -14,7 +14,11 @@ quality-audit-kit context refresh [repository] [--preview]
 quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--run[=knip,jscpd]] [--baseline file] [--decisions file]
 quality-audit-kit baseline run.json [--output file] [--replace] [--preview]
 quality-audit-kit triage run.json [--baseline file] [--decisions file] [--finding id --decision FIX|DEFER|KEEP_JUSTIFIED|FALSE_POSITIVE --reason text --reviewer name --reviewed-revision sha --evidence TYPE|REFERENCE|OUTCOME]
-quality-audit-kit report run.json [--format markdown|json] [--output file]
+quality-audit-kit report run.json [--format terminal|markdown|json] [--output file] [--bundle file.zip] [--include-evidence file[,file...]]
+quality-audit-kit report --verify-bundle file.zip
+quality-audit-kit plan run.json [--output plan.json] [--markdown plan.md] [--baseline file] [--decisions file]
+quality-audit-kit plan --next [plan.json]
+quality-audit-kit plan --export plan.json [--output prompts-directory]
 ```
 
 When running from a checkout without a package installation, use `node bin/quality-audit-kit.js` in place of `quality-audit-kit`.
@@ -71,6 +75,16 @@ By default `scan` writes the run JSON to stdout. This avoids changing the analyz
 `report` renders a saved run as a readable terminal summary by default. `--format markdown` writes a deterministic Markdown report and `--format json` writes the structured report contract in [`schemas/report.schema.json`](../schemas/report.schema.json). Every measurement repeats its `runId`, source SHA (when proven), context SHA, scope, engine, version, measurement status and validation state. Findings are separated into new, historical actionable, historical justified, resolved, reintroduced and unclassified groups; measurement failures and recommendations are separate. No global quality score is emitted.
 
 `report --format zip --output quality-audit-kit-run.zip` creates a deterministic offline bundle. It contains the sanitized run, structured JSON, Markdown, terminal summary, `manifest.json`, `inventory.json`, `checksums.sha256` and `VERIFY.txt`. `report --verify-bundle quality-audit-kit-run.zip` validates the ZIP, checksums, manifest, inventory, runId and context SHA without network access. `--include-evidence file[,file...]` is optional and only accepts explicitly authorized, non-source text/report files inside the run directory; source files, secret-like names, binary files and detected tokens are refused. Output files are written atomically and existing artifacts are never overwritten.
+
+## Correction planning
+
+`plan run.json` writes deterministic `quality-audit-kit.plan.json` and `quality-audit-kit.plan.md` artifacts unless explicit output paths are supplied. A lot groups findings only when the findings carry the same explicit common-cause identifier plus evidence/confirmation; shared ownership or similar wording alone never merges findings. Otherwise each finding remains its own lot, preventing redundant fixes without inventing a relation.
+
+The order is explained, not scored: confirmed security, regressions, broken contracts, structural causes, actionable debt, secondary improvements, then uncertain observations. Within a category the plan considers severity, confidence, finding count, known consumers, modification risk, estimated cost and stable lot ID. Missing factors remain `UNKNOWN`. Explicit finding dependencies are resolved to lot dependencies; unknown dependencies and cycles are retained as review blockers.
+
+`plan --next plan.json` returns the highest-priority lot with all predecessors available. It returns `NEEDS_TRIAGE`, `BLOCKED_BY_MEASUREMENT` or `NEEDS_REVIEW` instead of selecting a correction when the evidence is insufficient. `plan --export plan.json --output codex-prompts` writes one autonomous prompt per lot. Prompts include the objective, approved files, findings and provenance, invariants, verification checks and a stop condition. They do not execute Codex, modify source, change a baseline or install dependencies.
+
+Optional planning annotations belong under a finding's `planning` object in the audit-run contract. In particular, `commonCauseId` plus `commonCauseEvidence`/`commonCauseConfirmed` is required for cross-finding grouping; `responsibility`, `category`, `confidence`, `consumers`, `estimatedCost`, `changeRisk` and explicit dependency fields refine the plan without becoming an opaque score.
 
 ## Contract boundaries
 

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/quality-audit-kit/plan.schema.json",
+  "title": "Quality Audit Kit correction plan",
+  "description": "Deterministic correction lots and autonomous prompts derived from one audit run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "planVersion",
+    "planType",
+    "planId",
+    "runId",
+    "repository",
+    "inputScope",
+    "reproducible",
+    "status",
+    "ordering",
+    "measurementFailures",
+    "warnings",
+    "excludedFindings",
+    "dependencyCycles",
+    "lots",
+    "prompts"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "0.1-draft" },
+    "planVersion": { "const": "0.1-draft" },
+    "planType": { "const": "QUALITY_CORRECTION_PLAN" },
+    "planId": { "type": "string", "pattern": "^plan-[a-f0-9]{16}$" },
+    "runId": { "type": "string", "minLength": 8 },
+    "repository": { "type": "object" },
+    "inputScope": { "type": "string" },
+    "reproducible": { "type": "boolean" },
+    "status": { "enum": ["READY", "NEEDS_TRIAGE", "BLOCKED_BY_MEASUREMENT", "NEEDS_REVIEW", "NO_ACTIONABLE_FINDINGS"] },
+    "ordering": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule", "categories", "noOpaqueScore"],
+      "properties": {
+        "rule": { "type": "string" },
+        "categories": { "type": "array", "items": { "type": "object" } },
+        "noOpaqueScore": { "const": true }
+      }
+    },
+    "measurementFailures": { "type": "array", "items": { "type": "object" } },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "excludedFindings": { "type": "array", "items": { "type": "object" } },
+    "dependencyCycles": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
+    "lots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "category", "categoryLabel", "title", "status", "findings", "files", "responsibility", "cause", "dependencies", "dependencyReasons", "unresolvedDependencies", "factors", "rationale", "invariants", "checks", "stopCondition", "relationEvidence", "priority", "objective", "prompt"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^lot-[a-f0-9]{16}$" },
+          "category": { "type": "string" },
+          "categoryLabel": { "type": "string" },
+          "title": { "type": "string" },
+          "status": { "enum": ["READY", "NEEDS_TRIAGE", "CYCLE_REQUIRES_REVIEW"] },
+          "findings": { "type": "array", "items": { "type": "object" } },
+          "files": { "type": "array", "items": { "type": "string" } },
+          "responsibility": { "type": "object" },
+          "cause": { "type": "object" },
+          "dependencies": { "type": "array", "items": { "type": "string" } },
+          "dependencyReasons": { "type": "array", "items": { "type": "string" } },
+          "unresolvedDependencies": { "type": "array", "items": { "type": "string" } },
+          "factors": { "type": "object" },
+          "rationale": { "type": "array", "items": { "type": "string" } },
+          "invariants": { "type": "array", "items": { "type": "string" } },
+          "checks": { "type": "array", "items": { "type": "string" } },
+          "stopCondition": { "type": "string" },
+          "relationEvidence": { "type": "array", "items": { "type": "object" } },
+          "priority": { "type": "integer", "minimum": 1 },
+          "objective": { "type": "string" },
+          "prompt": { "type": "string" }
+        }
+      }
+    },
+    "prompts": { "type": "array", "items": { "type": "object" } }
+  }
+}

@@ -82,6 +82,7 @@ The configured ratchet defaults to zero new `HIGH`/`CRITICAL` findings. `maxNewB
 
 - [`audit-run.schema.json`](../schemas/audit-run.schema.json)
 - [`triage-decision.schema.json`](../schemas/triage-decision.schema.json)
+- [`plan.schema.json`](../schemas/plan.schema.json)
 - [Synthetic run](../examples/run.example.json)
 - [Synthetic decisions](../examples/decisions.example.json)
 

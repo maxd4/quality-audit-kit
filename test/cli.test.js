@@ -679,3 +679,109 @@ test('triage records the four supported decisions with evidence and stale contro
     cleanup(repository);
   }
 });
+
+test('plan groups only evidenced common causes, orders lots and exports Codex prompts', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const run = measuredRun({
+      runId: 'plan-run-0001',
+      seed: 'f',
+      findings: [
+        { id: 'plan-security-001', path: 'src/auth.js', severity: 'CRITICAL', message: 'confirmed security boundary' },
+        { id: 'plan-shared-001', path: 'src/validator.js', severity: 'HIGH', message: 'validator branch one' },
+        { id: 'plan-shared-002', path: 'src/validator.js', severity: 'MEDIUM', message: 'validator branch two' },
+        { id: 'plan-debt-001', path: 'src/consumer.js', severity: 'LOW', message: 'actionable debt' },
+        { id: 'plan-uncertain-1', path: 'src/unknown.js', severity: 'INFO', message: 'uncertain observation' },
+        { id: 'plan-justified-1', path: 'src/legacy.js', severity: 'LOW', message: 'accepted exception' },
+      ],
+    });
+    run.findings[0].securityConfirmed = true;
+    run.findings[0].responsibility = 'security';
+    for (const finding of run.findings.slice(1, 3)) {
+      finding.planCategory = 'STRUCTURAL_CAUSE';
+      finding.commonCauseId = 'shared-validator';
+      finding.commonCauseEvidence = 'Both findings are emitted by the same validator contract and the same owner confirmed one repair point.';
+      finding.responsibility = 'validation';
+      finding.consumers = ['src/consumer.js', 'tests/validator.test.js'];
+      finding.changeRisk = 'MEDIUM';
+      finding.estimatedCost = 'LOW';
+    }
+    run.findings[3].planCategory = 'ACTIONABLE_DEBT';
+    run.findings[3].dependsOnCauseId = 'shared-validator';
+    run.findings[3].responsibility = 'consumer';
+    run.findings[5].lifecycle = 'HISTORICAL_JUSTIFIED';
+    fs.writeFileSync(path.join(repository, 'run.json'), `${JSON.stringify(run, null, 2)}\n`);
+    fs.writeFileSync(path.join(repository, 'decisions.json'), JSON.stringify({ schemaVersion: '0.1-draft', decisions: [{ findingId: 'plan-justified-1', decision: 'KEEP_JUSTIFIED', reason: 'accepted exception', reviewer: 'reviewer', reviewedRevision: 'f'.repeat(40), evidence: [{ type: 'STATIC_CONTRACT', reference: 'docs/legacy.md', outcome: 'PASS' }] }] }, null, 2));
+
+    const created = runCli(repository, ['plan', 'run.json', '--decisions', 'decisions.json', '--output', 'plan.json', '--markdown', 'plan.md']);
+    assert.equal(created.status, 0, created.stderr);
+    const plan = JSON.parse(fs.readFileSync(path.join(repository, 'plan.json'), 'utf8'));
+    assert.equal(plan.status, 'NEEDS_TRIAGE');
+    assert.equal(plan.ordering.noOpaqueScore, true);
+    assert.equal(Object.hasOwn(plan, 'score'), false);
+    const sharedLots = plan.lots.filter((lot) => lot.findings.some((finding) => ['plan-shared-001', 'plan-shared-002'].includes(finding.id)));
+    assert.equal(sharedLots.length, 1);
+    assert.equal(sharedLots[0].findings.length, 2);
+    const debtLot = plan.lots.find((lot) => lot.findings.some((finding) => finding.id === 'plan-debt-001'));
+    assert.deepEqual(debtLot.dependencies, [sharedLots[0].id]);
+    assert.equal(plan.excludedFindings.some((finding) => finding.findingId === 'plan-justified-1'), true);
+    assert.equal(plan.prompts.every((prompt) => /Objective|Invariants|Verification|Stop condition/.test(prompt.content)), true);
+    assert.match(fs.readFileSync(path.join(repository, 'plan.md'), 'utf8'), /Correction lots/);
+
+    const repeated = runCli(repository, ['plan', 'run.json', '--decisions', 'decisions.json', '--output', 'plan-repeat.json', '--markdown', 'plan-repeat.md']);
+    assert.equal(repeated.status, 0, repeated.stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(repository, 'plan-repeat.json'), 'utf8')), plan);
+
+    const next = runCli(repository, ['plan', '--next', 'plan.json']);
+    assert.equal(next.status, 0, next.stderr);
+    const nextResult = JSON.parse(next.stdout);
+    assert.equal(nextResult.status, 'READY');
+    assert.equal(nextResult.lot.category, 'SECURITY_CONFIRMED');
+
+    const exported = runCli(repository, ['plan', '--export', 'plan.json', '--output', 'prompts']);
+    assert.equal(exported.status, 0, exported.stderr);
+    const exportedSummary = JSON.parse(exported.stdout);
+    assert.equal(exportedSummary.files.length, plan.prompts.length);
+    assert.equal(fs.readdirSync(path.join(repository, 'prompts')).length, plan.prompts.length);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('plan exposes dependency cycles and does not merge unsupported relations', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const run = measuredRun({
+      runId: 'plan-run-0002',
+      seed: '1',
+      findings: [
+        { id: 'plan-cycle-a', path: 'src/a.js', severity: 'HIGH', message: 'cycle a' },
+        { id: 'plan-cycle-b', path: 'src/b.js', severity: 'HIGH', message: 'cycle b' },
+        { id: 'plan-same-owner-a', path: 'src/c.js', severity: 'MEDIUM', message: 'same owner but no cause evidence' },
+        { id: 'plan-same-owner-b', path: 'src/d.js', severity: 'MEDIUM', message: 'same owner but no cause evidence' },
+      ],
+    });
+    run.findings[0].planCategory = 'ACTIONABLE_DEBT';
+    run.findings[0].dependsOn = ['plan-cycle-b'];
+    run.findings[1].planCategory = 'ACTIONABLE_DEBT';
+    run.findings[1].dependsOn = ['plan-cycle-a'];
+    run.findings[2].planCategory = 'ACTIONABLE_DEBT';
+    run.findings[2].responsibility = 'same-owner';
+    run.findings[3].planCategory = 'ACTIONABLE_DEBT';
+    run.findings[3].responsibility = 'same-owner';
+    fs.writeFileSync(path.join(repository, 'run.json'), `${JSON.stringify(run, null, 2)}\n`);
+    const created = runCli(repository, ['plan', 'run.json', '--output', 'plan.json']);
+    assert.equal(created.status, 0, created.stderr);
+    const plan = JSON.parse(fs.readFileSync(path.join(repository, 'plan.json'), 'utf8'));
+    assert.equal(plan.status, 'NEEDS_REVIEW');
+    assert.equal(plan.dependencyCycles.length, 1);
+    assert.equal(plan.lots.filter((lot) => lot.status === 'CYCLE_REQUIRES_REVIEW').length, 2);
+    assert.equal(plan.lots.filter((lot) => lot.findings.some((finding) => finding.id.startsWith('plan-same-owner'))).length, 2);
+
+    const next = runCli(repository, ['plan', '--next', 'plan.json']);
+    assert.equal(next.status, 0, next.stderr);
+    assert.equal(JSON.parse(next.stdout).status, 'NEEDS_REVIEW');
+  } finally {
+    cleanup(repository);
+  }
+});

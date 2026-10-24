@@ -22,6 +22,7 @@ const {
   verifyBundle,
   writeOutput,
 } = require('./report');
+const { buildPlan, nextLot, renderPlanMarkdown } = require('./planner');
 const {
   TEMPLATE_FILES,
   buildAgentPrompt,
@@ -57,7 +58,7 @@ function parseArguments(argv) {
     }
     const name = token.slice(2);
     const next = tokens[index + 1];
-    if (next && !next.startsWith('--') && !['help', 'force', 'preview', 'update-templates', 'link-agents', 'replace'].includes(name)) {
+    if (next && !next.startsWith('--') && !['help', 'force', 'preview', 'update-templates', 'link-agents', 'replace', 'next', 'export'].includes(name)) {
       options[name] = next;
       index += 1;
     } else {
@@ -638,6 +639,93 @@ function triageCommand(positional, options) {
   if (['NOT_EVALUATED', 'STALE_DECISIONS', 'FAIL'].includes(status)) process.exitCode = 2;
 }
 
+function planContext(inputPath, options) {
+  const resolvedInput = path.resolve(process.cwd(), inputPath);
+  const run = readJson(resolvedInput);
+  const target = findRepositoryRoot(options.repository || path.dirname(resolvedInput));
+  const config = loadConfig(target);
+  const quality = configuredQuality(target, config);
+  const baselinePath = options.baseline !== undefined
+    ? resolveRepositoryFile(target, options.baseline, quality.baseline)
+    : fs.existsSync(resolveRepositoryFile(target, quality.baseline, quality.baseline))
+      ? resolveRepositoryFile(target, quality.baseline, quality.baseline)
+      : null;
+  const decisionsPath = options.decisions !== undefined
+    ? resolveRepositoryFile(target, options.decisions, quality.decisions)
+    : fs.existsSync(resolveRepositoryFile(target, quality.decisions, quality.decisions))
+      ? resolveRepositoryFile(target, quality.decisions, quality.decisions)
+      : null;
+  const decisions = loadDecisionBundle(decisionsPath);
+  let enrichedRun = run;
+  let staleDecisions = run.comparison?.staleDecisions || [];
+  if (baselinePath && fs.existsSync(baselinePath)) {
+    const comparison = compareRuns(readJson(baselinePath), run, decisions, quality.ratchet);
+    const { classifiedFindings, ...serializableComparison } = comparison;
+    enrichedRun = {
+      ...run,
+      ...(classifiedFindings ? { findings: classifiedFindings } : {}),
+      comparison: serializableComparison,
+      qualityGate: comparison.qualityGate,
+    };
+    staleDecisions = comparison.staleDecisions || [];
+  } else if (decisionsPath) {
+    staleDecisions = evaluateDecisionStaleness(decisions, run, null, run.comparison || null);
+  }
+  return { inputPath: resolvedInput, run: enrichedRun, decisions, staleDecisions, target, quality };
+}
+
+function planCommand(positional, options) {
+  if (options.next) return planNextCommand(positional, options);
+  if (options.export) return planExportCommand(positional, options);
+  const input = positional[0] || options.run;
+  if (!input) throw new Error('plan requires an audit run JSON path.');
+  const context = planContext(input, options);
+  const plan = buildPlan(context.run, { decisions: context.decisions, staleDecisions: context.staleDecisions });
+  const outputPath = path.resolve(process.cwd(), options.output || 'quality-audit-kit.plan.json');
+  const markdownPath = path.resolve(process.cwd(), options.markdown || outputPath.replace(/\.json$/i, '.md'));
+  writeOutput(outputPath, `${JSON.stringify(plan, null, 2)}\n`);
+  writeOutput(markdownPath, renderPlanMarkdown(plan));
+  process.stdout.write(`${JSON.stringify({ command: 'plan', status: plan.status, planId: plan.planId, runId: plan.runId, output: path.relative(process.cwd(), outputPath).split(path.sep).join('/'), markdown: path.relative(process.cwd(), markdownPath).split(path.sep).join('/'), lotCount: plan.lots.length, excludedFindingCount: plan.excludedFindings.length }, null, 2)}\n`);
+}
+
+function loadPlanOrCreate(input, options) {
+  const inputPath = path.resolve(process.cwd(), input || 'quality-audit-kit.plan.json');
+  const value = readJson(inputPath);
+  if (value.planType === 'QUALITY_CORRECTION_PLAN' && Array.isArray(value.lots)) return value;
+  const context = planContext(inputPath, options);
+  return buildPlan(context.run, { decisions: context.decisions, staleDecisions: context.staleDecisions });
+}
+
+function planNextCommand(positional, options) {
+  const plan = loadPlanOrCreate(positional[0] || options.plan, options);
+  const next = nextLot(plan);
+  const result = {
+    command: 'plan --next',
+    status: next.status,
+    planId: plan.planId,
+    runId: plan.runId,
+    reason: next.reason,
+    ...(next.lot ? { lot: next.lot, prompt: plan.prompts.find((prompt) => prompt.lotId === next.lot.id)?.content || null } : { lot: null, prompt: null }),
+  };
+  const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
+  const content = `${JSON.stringify(result, null, 2)}\n`;
+  if (outputPath) writeOutput(outputPath, content);
+  else process.stdout.write(content);
+}
+
+function planExportCommand(positional, options) {
+  const plan = loadPlanOrCreate(positional[0] || options.plan, options);
+  const outputDirectory = path.resolve(process.cwd(), options.output || 'quality-audit-kit-codex-prompts');
+  fs.mkdirSync(outputDirectory, { recursive: true });
+  const files = [];
+  for (const prompt of plan.prompts || []) {
+    const outputPath = path.join(outputDirectory, prompt.fileName);
+    writeOutput(outputPath, prompt.content);
+    files.push(path.relative(process.cwd(), outputPath).split(path.sep).join('/'));
+  }
+  process.stdout.write(`${JSON.stringify({ command: 'plan --export', status: 'EXPORTED', planId: plan.planId, runId: plan.runId, outputDirectory: path.relative(process.cwd(), outputDirectory).split(path.sep).join('/'), files }, null, 2)}\n`);
+}
+
 function reportCommand(positional, options) {
   if (options['verify-bundle'] !== undefined) {
     const bundlePath = options['verify-bundle'] === true ? positional[0] : options['verify-bundle'];
@@ -675,9 +763,13 @@ function printHelpDetailed() {
   process.stdout.write(`Quality Audit Kit ${require('../package.json').version} (experimental)\n\nUsage:\n  quality-audit-kit init [repository] [--force] [--templates deterministic|none] [--update-templates] [--preview]\n  quality-audit-kit init [repository] --agent codex [--agent-prompt file] [--agent-input file]\n  quality-audit-kit context refresh [repository] [--preview]\n  quality-audit-kit init [repository] --link-agents\n  quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--run[=knip,jscpd]] [--baseline file] [--decisions file]\n  quality-audit-kit baseline run.json [--output file] [--replace] [--preview]\n  quality-audit-kit triage run.json [--baseline file] [--decisions file] [--finding id --decision FIX|DEFER|KEEP_JUSTIFIED|FALSE_POSITIVE --reason text --reviewer name --reviewed-revision sha --evidence TYPE|REFERENCE|OUTCOME]\n  quality-audit-kit report run.json [--format terminal|markdown|json] [--output file] [--bundle file.zip] [--include-evidence file[,file...]]\n  quality-audit-kit report --verify-bundle file.zip\n\nreport defaults to a readable terminal summary. Markdown and structured JSON are deterministic derived views. --bundle creates an offline ZIP with manifest, inventory, checksums and verification instructions. Existing output artifacts are never overwritten; source files, secrets and absolute paths are not bundled.\nNo scanner, failed scanner, incomplete audit, or unmeasured scanner is treated as a clean result.\n`);
 }
 
+function printPlanHelp() {
+  process.stdout.write('\nPlan usage:\n  quality-audit-kit plan run.json [--output plan.json] [--markdown plan.md] [--baseline file] [--decisions file]\n  quality-audit-kit plan --next [plan.json] [--output next.json]\n  quality-audit-kit plan --export plan.json [--output prompts-directory]\n\nplan creates deterministic correction lots and autonomous Codex prompts. Grouping requires explicit common-cause evidence; uncertain findings, stale decisions, missing measurements and dependency cycles remain visible and block silent correction claims.\n');
+}
+
 async function main(argv) {
   const { command, options, positional } = parseArguments(argv);
-  if (options.help || command === 'help' || command === '--help') return printHelpDetailed();
+  if (options.help || command === 'help' || command === '--help') { printHelpDetailed(); printPlanHelp(); return; }
   if (options.version || command === '--version') return process.stdout.write(`${require('../package.json').version}\n`);
   if (command === 'init') return initCommand(positional, options);
   if (command === 'context') {
@@ -687,6 +779,7 @@ async function main(argv) {
   if (command === 'scan') return scanCommand(positional, options);
   if (command === 'baseline') return baselineCommand(positional, options);
   if (command === 'triage') return triageCommand(positional, options);
+  if (command === 'plan') return planCommand(positional, options);
   if (command === 'report') return reportCommand(positional, options);
   throw new Error(`Unknown command: ${command}. Use --help for usage.`);
 }

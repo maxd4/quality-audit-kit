@@ -597,6 +597,30 @@
           },
           "rawReference": {
             "type": "string"
+          },
+          "planning": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "responsibility": { "type": "string" },
+              "category": { "type": "string" },
+              "planCategory": { "type": "string" },
+              "commonCauseId": { "type": "string" },
+              "commonCauseEvidence": { "type": "string" },
+              "commonCauseConfirmed": { "type": "boolean" },
+              "confidence": { "type": "string" },
+              "consumers": { "type": "array", "items": { "type": "string" } },
+              "consumerCount": { "type": "integer", "minimum": 0 },
+              "estimatedCost": { "type": "string" },
+              "changeRisk": { "type": "string" },
+              "dependsOnFindings": { "type": "array", "items": { "type": "string" } },
+              "dependsOnCauseId": { "type": "string" },
+              "securityConfirmed": { "type": "boolean" },
+              "contractBroken": { "type": "boolean" },
+              "causeType": { "type": "string" },
+              "justified": { "type": "boolean" },
+              "falsePositive": { "type": "boolean" }
+            }
           }
         }
       }
