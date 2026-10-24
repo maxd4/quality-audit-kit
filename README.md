@@ -69,6 +69,7 @@ node bin/quality-audit-kit.js scan /path/to/repository --sarif-report report.sar
 node bin/quality-audit-kit.js report run.json --format sarif --output report.sarif
 node bin/quality-audit-kit.js connect sonar --sonar-url https://sonar.example --sonar-project project-key
 node bin/quality-audit-kit.js import sonar /path/to/repository --sonar-url https://sonar.example --sonar-project project-key --sonar-token-env SONAR_TOKEN --output sonar-run.json
+node bin/quality-audit-kit.js import sonar-export sonarqube-export.json --repository /path/to/repository --output sonar-run.json
 node bin/quality-audit-kit.js report run.json --format zip --output quality-audit-kit-run.zip
 node bin/quality-audit-kit.js report --verify-bundle quality-audit-kit-run.zip
 node bin/quality-audit-kit.js plan run.json --output quality-audit-kit.plan.json

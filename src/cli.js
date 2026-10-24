@@ -26,7 +26,7 @@ const { buildPlan, nextLot, renderPlanMarkdown } = require('./planner');
 const { buildThresholdConfig, recommendThresholds, renderThresholdsMarkdown } = require('./thresholds');
 const { executeFix, runValidations, verifyFixResult } = require('./fix');
 const { buildSarif, importSarifFile } = require('./sarif');
-const { connectSonar, importSonar } = require('./sonar');
+const { connectSonar, importSonar, importSonarExport } = require('./sonar');
 const {
   TEMPLATE_FILES,
   buildAgentPrompt,
@@ -1026,19 +1026,22 @@ async function importCommand(positional, options) {
     if (result.engine.measurementStatus !== 'MEASURED') process.exitCode = 2;
     return run;
   }
-  if (positional[0] !== 'sonar') throw new Error('import currently supports only the sarif and sonar connectors.');
-  const target = findRepositoryRoot(options.repository || positional[1] || process.cwd());
+  if (positional[0] !== 'sonar' && positional[0] !== 'sonar-export') throw new Error('import currently supports only the sarif, sonar and sonar-export connectors.');
+  const exportPath = options['sonar-export'] || (positional[0] === 'sonar-export' ? positional[1] : null);
+  const target = findRepositoryRoot(options.repository || (positional[0] === 'sonar-export' ? positional[2] : positional[1]) || process.cwd());
   const discovery = discover(target);
-  const result = await importSonar(target, {
-    url: options['sonar-url'] || options.url || process.env.SONAR_URL,
-    project: options['sonar-project'] || options.project || process.env.SONAR_PROJECT,
-    branch: options['sonar-branch'] || options.branch,
-    pullRequest: options['sonar-pull-request'] || options.pullRequest,
-    revision: options['sonar-revision'] || options.revision,
-    maxResults: options['sonar-max-results'] || options.maxResults,
-    tokenEnv: options['sonar-token-env'],
-    tokenFile: options['sonar-token-file'],
-  });
+  const result = exportPath
+    ? importSonarExport(target, path.isAbsolute(String(exportPath)) ? String(exportPath) : path.resolve(process.cwd(), String(exportPath)))
+    : await importSonar(target, {
+      url: options['sonar-url'] || options.url || process.env.SONAR_URL,
+      project: options['sonar-project'] || options.project || process.env.SONAR_PROJECT,
+      branch: options['sonar-branch'] || options.branch,
+      pullRequest: options['sonar-pull-request'] || options.pullRequest,
+      revision: options['sonar-revision'] || options.revision,
+      maxResults: options['sonar-max-results'] || options.maxResults,
+      tokenEnv: options['sonar-token-env'],
+      tokenFile: options['sonar-token-file'],
+    });
   const contextCommitSha = gitCommit(target);
   const run = {
     schemaVersion: '0.1-draft',
@@ -1046,7 +1049,9 @@ async function importCommand(positional, options) {
     repository: {
       name: discovery.repositoryName,
       ...(contextCommitSha ? { contextCommitSha, commitSha: contextCommitSha } : {}),
-      sourceScopeDescription: 'SonarQube findings were imported from the declared project analysis. Any local Git SHA is context only; engine.sourceRevision is the SonarQube analysis revision.',
+      sourceScopeDescription: exportPath
+        ? 'SonarQube findings were imported from an explicitly downloaded browser export. Any local Git SHA is context only; engine.sourceRevision is the SonarQube analysis revision.'
+        : 'SonarQube findings were imported from the declared project analysis. Any local Git SHA is context only; engine.sourceRevision is the SonarQube analysis revision.',
     },
     inputScope: 'WORKTREE_LIVE',
     reproducible: false,
@@ -1231,7 +1236,7 @@ function printFixHelp() {
 }
 
 function printConnectorHelp() {
-  process.stdout.write('\nConnector usage:\n  quality-audit-kit scan [repository] --sarif-report report.sarif\n  quality-audit-kit import sarif report.sarif [--repository repository] [--output run.json]\n  quality-audit-kit report run.json --format sarif --output report.sarif\n  quality-audit-kit connect sonar --sonar-url URL [--sonar-token-env NAME|--sonar-token-file FILE]\n  quality-audit-kit import sonar [repository] --sonar-url URL --sonar-project KEY [--sonar-branch NAME|--sonar-pull-request KEY] [--sonar-max-results N] [--output run.json]\n\nSARIF is local and requires no account. SonarQube uses official API endpoints, keeps tokens outside repository artifacts, paginates with a bounded result limit and records Sonar analysis revision separately from local Git context.\n');
+  process.stdout.write('\nConnector usage:\n  quality-audit-kit scan [repository] --sarif-report report.sarif\n  quality-audit-kit import sarif report.sarif [--repository repository] [--output run.json]\n  quality-audit-kit report run.json --format sarif --output report.sarif\n  quality-audit-kit connect sonar --sonar-url URL [--sonar-token-env NAME|--sonar-token-file FILE]\n  quality-audit-kit import sonar [repository] --sonar-url URL --sonar-project KEY [--sonar-branch NAME|--sonar-pull-request KEY] [--sonar-max-results N] [--output run.json]\n  quality-audit-kit import sonar-export export.json [--repository repository] [--output run.json]\n  quality-audit-kit import sonar [repository] --sonar-export export.json [--output run.json]\n\nSARIF is local and requires no account. SonarQube uses official API endpoints, keeps tokens outside repository artifacts, paginates with a bounded result limit and records Sonar analysis revision separately from local Git context. A browser export is a local, same-origin Web API capture that is imported through the same SonarQube normalization contract.\n');
 }
 
 async function main(argv) {

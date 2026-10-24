@@ -1,0 +1,79 @@
+{
+  "format": "quality-audit-kit/sonarqube-browser-export",
+  "formatVersion": 1,
+  "exportedAt": "2026-10-24T12:00:00.000Z",
+  "status": "MEASURED",
+  "source": {
+    "origin": "https://sonar.example.invalid",
+    "project": "demo-project",
+    "branch": "main",
+    "pullRequest": null,
+    "version": "10.6.0.92116",
+    "apiProfile": "web-api-v2-aware-v1-compatible",
+    "compatibility": {
+      "status": "COMPATIBLE",
+      "profile": "web-api-v2-aware-v1-compatible"
+    }
+  },
+  "serverVersion": {
+    "endpoint": "/api/server/version",
+    "response": "10.6.0.92116"
+  },
+  "issues": {
+    "endpoint": "/api/issues/search",
+    "pagination": {
+      "requestedLimit": 1000,
+      "pageSize": 500,
+      "reportedTotal": 1,
+      "exportedCount": 1,
+      "pageCount": 1,
+      "status": "COMPLETE",
+      "limitReached": false
+    },
+    "pages": [
+      {
+        "request": {
+          "componentKeys": "demo-project",
+          "p": 1,
+          "ps": 500,
+          "branch": "main"
+        },
+        "response": {
+          "paging": {
+            "pageIndex": 1,
+            "pageSize": 500,
+            "total": 1
+          },
+          "issues": [
+            {
+              "key": "AYdemoIssue1",
+              "rule": "javascript:S1854",
+              "severity": "MAJOR",
+              "component": "demo-project:src/example.js",
+              "line": 12,
+              "message": "Remove this useless assignment."
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "analysis": {
+    "endpoint": "/api/project_analyses/search",
+    "response": {
+      "analyses": [
+        {
+          "key": "demo-analysis-1",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "date": "2026-10-24T11:00:00+0000"
+        }
+      ]
+    },
+    "selected": {
+      "key": "demo-analysis-1",
+      "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "date": "2026-10-24T11:00:00+0000"
+    }
+  },
+  "diagnostics": []
+}

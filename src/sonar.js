@@ -8,6 +8,8 @@ const { normalizeSonar } = require('./normalize');
 const DEFAULT_MAX_RESULTS = 1000;
 const MAX_RESULTS_LIMIT = 10000;
 const PAGE_SIZE = 500;
+const SONAR_BROWSER_EXPORT_FORMAT = 'quality-audit-kit/sonarqube-browser-export';
+const SONAR_BROWSER_EXPORT_VERSION = 1;
 
 class SonarHttpError extends Error {
   constructor(status, pathname, message) {
@@ -234,4 +236,137 @@ async function importSonar(root, options = {}) {
   }, [token.value]);
 }
 
-module.exports = { DEFAULT_MAX_RESULTS, MAX_RESULTS_LIMIT, SonarHttpError, connectSonar, createClient, fetchIssues, importSonar, normalizeUrl, readToken, versionProfile };
+function readSonarBrowserExport(root, filePath) {
+  let payload;
+  try {
+    payload = JSON.parse(fs.readFileSync(path.resolve(filePath), 'utf8'));
+  } catch {
+    throw new Error('SonarQube browser export must be a readable JSON file.');
+  }
+  if (!payload || typeof payload !== 'object' || payload.format !== SONAR_BROWSER_EXPORT_FORMAT || payload.formatVersion !== SONAR_BROWSER_EXPORT_VERSION) {
+    throw new Error(`Unsupported SonarQube browser export format; expected ${SONAR_BROWSER_EXPORT_FORMAT} v${SONAR_BROWSER_EXPORT_VERSION}.`);
+  }
+  const source = payload.source;
+  if (!source || typeof source.project !== 'string' || !source.project.trim() || typeof source.version !== 'string' || !source.version.trim()) {
+    throw new Error('SonarQube browser export is missing source project or server version metadata.');
+  }
+  const pages = payload.issues?.pages;
+  if (!Array.isArray(pages)) throw new Error('SonarQube browser export is missing paginated issue responses.');
+  return { payload, source, pages };
+}
+
+function importSonarExport(root, filePath) {
+  const { payload, source, pages } = readSonarBrowserExport(root, filePath);
+  const diagnostics = Array.isArray(payload.diagnostics) ? payload.diagnostics.map((item) => ({ ...item })) : [];
+  const issues = [];
+  const seenIssueKeys = new Set();
+  let reportedTotal = Number.isInteger(payload.issues?.pagination?.reportedTotal) ? payload.issues.pagination.reportedTotal : null;
+  let status = payload.status === 'MEASURED' ? 'MEASURED' : payload.status === 'PARTIAL' ? 'PARTIAL' : 'FAILURE';
+
+  if (source.compatibility?.status !== 'COMPATIBLE') {
+    status = 'FAILURE';
+    diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'INCOMPATIBLE_EXPORT_VERSION', reference: '/api/server/version', message: 'The browser export declared an incompatible or unverified SonarQube server version; the findings are not a clean measurement.' });
+  }
+
+  let expectedPage = 1;
+  for (const [index, page] of pages.entries()) {
+    const response = page?.response;
+    const pageIndex = response?.paging?.pageIndex;
+    const pageIssues = response?.issues;
+    if (!Number.isInteger(pageIndex) || pageIndex !== expectedPage || !Array.isArray(pageIssues)) {
+      status = status === 'FAILURE' ? status : 'PARTIAL';
+      diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'EXPORT_PAGINATION_INCOMPLETE', reference: `/api/issues/search?page=${index + 1}`, message: 'The browser export contains a missing, reordered or malformed issue page; completeness is not established.' });
+      continue;
+    }
+    if (Number.isInteger(response.paging.total)) {
+      if (reportedTotal === null) reportedTotal = response.paging.total;
+      if (response.paging.total !== reportedTotal) {
+        status = status === 'FAILURE' ? status : 'PARTIAL';
+        diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'PAGINATION_TOTAL_CHANGED', reference: `/api/issues/search?p=${pageIndex}`, message: 'SonarQube reported different totals across exported pages; completeness is not established.' });
+      }
+    }
+    expectedPage += 1;
+    for (const issue of pageIssues) {
+      const key = issue?.key === undefined ? null : String(issue.key);
+      if (key && seenIssueKeys.has(key)) {
+        status = status === 'FAILURE' ? status : 'PARTIAL';
+        diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'DUPLICATE_ISSUE', reference: `sonarqube://issues/${encodeURIComponent(key)}`, message: 'The browser export repeated a SonarQube issue across pages; the duplicate was retained for auditability.' });
+      }
+      if (key) seenIssueKeys.add(key);
+      issues.push(issue);
+    }
+  }
+
+  const requestedLimit = Number(payload.issues?.pagination?.requestedLimit);
+  if (Number.isInteger(reportedTotal) && Number.isInteger(requestedLimit) && reportedTotal > requestedLimit) {
+    status = status === 'FAILURE' ? status : 'PARTIAL';
+    diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'RESULT_LIMIT_REACHED', reference: '/api/issues/search', message: `SonarQube reported ${reportedTotal} results; the browser export limit ${requestedLimit} was reached.` });
+  }
+  if (Number.isInteger(reportedTotal) && issues.length < reportedTotal) {
+    status = status === 'FAILURE' ? status : 'PARTIAL';
+    diagnostics.push({ kind: 'SONAR_DIAGNOSTIC', code: 'EXPORT_PAGINATION_INCOMPLETE', reference: '/api/issues/search', message: `The browser export contains ${issues.length} issues for a reported total of ${reportedTotal}; absence cannot be inferred.` });
+  }
+  if (payload.issues?.pagination?.status !== 'COMPLETE' && status === 'MEASURED') status = 'PARTIAL';
+
+  const analysisResponse = payload.analysis?.response;
+  const analysis = Array.isArray(analysisResponse?.analyses) ? analysisResponse.analyses[0] || null : null;
+  const sourceRevision = analysisRevision(analysis);
+  const reference = `sonarqube://${encodeURIComponent(source.project)}/browser-export`;
+  const normalized = normalizeSonar(root, issues, { kind: 'EXPORT', reference, sourceRevision, measurementStatus: status });
+  const allDiagnostics = [...diagnostics, ...normalized.diagnostics];
+  const branch = source.branch || null;
+  const pullRequest = source.pullRequest || null;
+  return redactSecrets({
+    version: source.version,
+    apiProfile: source.apiProfile || versionProfile(source.version),
+    project: source.project,
+    branch,
+    pullRequest,
+    analysis,
+    sourceRevision,
+    status,
+    findings: normalized.findings,
+    diagnostics: allDiagnostics,
+    engine: {
+      name: 'sonarqube',
+      version: source.version,
+      projectKey: source.project,
+      ...(branch ? { branch } : {}),
+      ...(pullRequest ? { pullRequest } : {}),
+      measurementStatus: status,
+      gateOutcome: status === 'MEASURED' ? 'INFORMATIVE' : 'NOT_EVALUATED',
+      sourceRevision,
+      scope: branch ? `sonarqube:${source.project}@branch:${branch}` : pullRequest ? `sonarqube:${source.project}@pull-request:${pullRequest}` : `sonarqube:${source.project}`,
+      metadata: {
+        browserExport: true,
+        browserExportFormat: SONAR_BROWSER_EXPORT_FORMAT,
+        browserExportVersion: SONAR_BROWSER_EXPORT_VERSION,
+        ...(payload.exportedAt ? { exportedAt: String(payload.exportedAt) } : {}),
+        importedIssueCount: issues.length,
+        reportedIssueCount: reportedTotal,
+        pageCount: pages.length,
+        paginationStatus: payload.issues?.pagination?.status || 'UNKNOWN',
+        ...(payload.serverVersion?.endpoint ? { serverVersionEndpoint: String(payload.serverVersion.endpoint) } : {}),
+      },
+      diagnostic: allDiagnostics.length ? `${allDiagnostics.length} SonarQube diagnostic(s) were retained; the imported measure is not necessarily complete.` : undefined,
+    },
+  }, []);
+}
+
+module.exports = {
+  DEFAULT_MAX_RESULTS,
+  MAX_RESULTS_LIMIT,
+  SONAR_BROWSER_EXPORT_FORMAT,
+  SONAR_BROWSER_EXPORT_VERSION,
+  SonarHttpError,
+  analysisRevision,
+  connectSonar,
+  createClient,
+  fetchIssues,
+  importSonar,
+  importSonarExport,
+  normalizeUrl,
+  readSonarBrowserExport,
+  readToken,
+  versionProfile,
+};
