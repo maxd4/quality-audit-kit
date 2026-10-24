@@ -97,6 +97,205 @@
       "type": "string",
       "format": "date-time"
     },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "compatible",
+        "baselineRunId",
+        "currentRunId",
+        "matches",
+        "resolved",
+        "reasons",
+        "staleDecisions"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "COMPATIBLE",
+            "NOT_EVALUATED"
+          ]
+        },
+        "compatible": {
+          "type": "boolean"
+        },
+        "baselineRunId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "currentRunId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "matches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "resolved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "staleDecisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "qualityGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "policy",
+        "blockedReasons",
+        "newBlockingFindings",
+        "proposals",
+        "policyRelaxation"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "NOT_EVALUATED"
+          ]
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "blockingSeverities",
+            "maxNewBlockingFindings",
+            "maxMeasuredFindings"
+          ],
+          "properties": {
+            "blockingSeverities": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "INFO",
+                  "LOW",
+                  "MEDIUM",
+                  "HIGH",
+                  "CRITICAL"
+                ]
+              }
+            },
+            "maxNewBlockingFindings": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "maxMeasuredFindings": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        },
+        "blockedReasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "newBlockingFindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "proposals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "policyRelaxation": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "createdAt",
+        "history",
+        "policySnapshot"
+      ],
+      "properties": {
+        "kind": {
+          "const": "QUALITY_BASELINE"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "history": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "policySnapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "blockingSeverities",
+            "maxNewBlockingFindings",
+            "maxMeasuredFindings"
+          ],
+          "properties": {
+            "blockingSeverities": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "maxNewBlockingFindings": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "maxMeasuredFindings": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        },
+        "replacedBaselineRunId": {
+          "type": "string"
+        }
+      }
+    },
     "discovery": {
       "type": "object",
       "additionalProperties": false,

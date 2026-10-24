@@ -37,7 +37,7 @@ Proposed fingerprint input: `engine + ruleId + normalized repo-relative path + s
 
 ## Human decision contract
 
-A decision identifies the exact finding and one of `FIX`, `MIGRATE`, `INTERNALIZE`, `RESTORE_FUNCTIONALITY`, `KEEP_JUSTIFIED`, `DEFER` or `FALSE_POSITIVE`, with a reason, reviewer attribution, reviewed revision, evidence links and optionally an expiration/re-review condition. An exact classification in CleanMyMap is not necessarily a universally appropriate future policy; the values are a draft extension point.
+A decision identifies the exact finding and, for the current CLI, one of `FIX`, `DEFER`, `KEEP_JUSTIFIED` or `FALSE_POSITIVE`, with a reason, reviewer attribution, reviewed revision, evidence links and optionally an expiration/re-review condition. The schema retains older draft values for compatibility with prior examples, but the new CLI does not create them. An exact classification in CleanMyMap is not a universally appropriate future policy; these generic values remain repository-owned.
 
 A justified exception must become `STALE` if its finding disappears, its scope changes unexpectedly, or its review conditions are no longer satisfied. Stale does not automatically mean fixed or safe.
 
@@ -63,6 +63,20 @@ Evidence must carry its producer, scope, revision or artifact reference and outc
 - A first observation without a comparison remains `UNCLASSIFIED`; `NEW` requires an actual comparison against a qualifying baseline or history.
 - The repository `commitSha`/`contextCommitSha` identifies Git context, not automatically the revision analyzed by an imported report. Each engine measurement carries independent `sourceRevision` evidence with `VERIFIED`, `UNVERIFIED` or `UNKNOWN` status.
 - A valid JSON payload from a failed scanner process is not a complete measurement unless the exit code is an expected findings/threshold code for that scanner.
+
+## Historical comparison
+
+`baseline` stores a complete measured audit run plus a `QUALITY_BASELINE` block. Replacing it with `--replace` appends the former baseline and its prior history as immutable run snapshots. The snapshots retain finding IDs, provenance, engine status and source-revision evidence so a later complete run can identify a reintroduction without treating an incomplete run as a resolution.
+
+Two runs are comparable only when their schema version, repository name, input scope and measured engine set agree, every engine is `MEASURED` and every engine/finding source revision is `VERIFIED`. Imported reports with `UNKNOWN` source revision, missing scanners, failed scanners and `NOT_EVALUATED` engines are not comparable. Exact IDs handle line moves. A unique message-based comparison key may correlate a file move; ambiguous matches are deliberately not inferred.
+
+The comparison output is evidence, not a baseline mutation. It records matches, resolved baseline findings, stale decisions and the quality-gate result in the run. `NEW` and `REINTRODUCED` are the only lifecycle states considered new temporal debt; a valid `KEEP_JUSTIFIED` or `FALSE_POSITIVE` decision can keep a historical finding justified, while `FIX` and `DEFER` remain actionable. A stale decision is never used to justify a gate.
+
+## Decisions and ratchets
+
+The existing triage decision schema remains the decision evidence contract. The public CLI accepts `FIX`, `DEFER`, `KEEP_JUSTIFIED` and `FALSE_POSITIVE`; it preserves prior records and appends a new decision rather than rewriting the evidence bundle. Every decision includes a reason, reviewer, reviewed Git revision and one or more evidence records. A passed `reviewAfter`, disappearance of a justified/actionable finding, or a changed file scope marks the latest decision `STALE`.
+
+The configured ratchet defaults to zero new `HIGH`/`CRITICAL` findings. `maxNewBlockingFindings` and optional `maxMeasuredFindings` are ceilings. Increasing a ceiling, removing a blocking severity or making a finite ceiling unlimited is a policy relaxation and fails the gate. A measured reduction may produce a `STRICTER_CEILING` proposal with `EXPLICIT_REVIEW_REQUIRED`; no baseline, decision or policy is changed implicitly.
 
 ## Draft files
 

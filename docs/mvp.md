@@ -33,7 +33,7 @@ quality-audit-kit scan
 quality-audit-kit report
 ```
 
-`init` writes an explicit local configuration and deterministic `PROJECT_HANDOFF.md` / `COMMIT_REVIEW.md` templates. It can prepare an explicit Codex customization request and refresh only managed generated blocks. `scan` is read-only toward source and policy, imports existing Knip/jscpd JSON reports and can execute locally installed binaries only when `--run` is explicit. `report` formats existing recorded evidence. Baselines, triage mutation and policy gates remain unimplemented.
+`init` writes an explicit local configuration and deterministic `PROJECT_HANDOFF.md` / `COMMIT_REVIEW.md` templates. It can prepare an explicit Codex customization request and refresh only managed generated blocks. `scan` is read-only toward source and policy, imports existing Knip/jscpd JSON reports and can execute locally installed binaries only when `--run` is explicit. `baseline` creates an explicit measured-run baseline, `triage` appends evidence-backed decisions and reports stale decisions, and `scan --baseline` applies a configured ratchet without mutating the baseline automatically. `report` formats existing recorded evidence. These capabilities remain experimental and local-first.
 
 ## Acceptance criteria
 

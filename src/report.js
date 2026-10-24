@@ -29,6 +29,16 @@ function renderMarkdown(run) {
   }
 
   lines.push('', '## Discovery', '', `- Package manager: \`${discovery.packageManager.name || 'none'}\``, `- Languages: ${discovery.languages.length ? discovery.languages.join(', ') : 'none detected'}`, `- Workspaces: ${discovery.workspaces.packages.length || 0} detected`, `- Configurations: ${discovery.configurations.length || 0}`, '', '## Findings', '');
+  if (run.comparison) {
+    lines.push('## Historical comparison', '', `- Status: \`${run.comparison.status}\``, `- Baseline run: \`${run.comparison.baselineRunId || 'UNKNOWN'}\``, `- Matches: ${(run.comparison.matches || []).length}`, `- Resolved: ${(run.comparison.resolved || []).length}`, '');
+    if (run.comparison.reasons?.length) lines.push(`- Reasons: ${run.comparison.reasons.join(' ')}`, '');
+  }
+  if (run.qualityGate) {
+    lines.push('## Quality gate', '', `- Status: \`${run.qualityGate.status}\``, `- New blocking findings: ${(run.qualityGate.newBlockingFindings || []).length}`, `- Stale decisions: ${(run.comparison?.staleDecisions || []).filter((decision) => decision.status === 'STALE').length}`, '');
+    for (const proposal of run.qualityGate.proposals || []) lines.push(`- Proposal only: ${proposal.message}`);
+    if (run.qualityGate.blockedReasons?.length) lines.push(`- Blocked reasons: ${run.qualityGate.blockedReasons.join(' ')}`);
+    lines.push('');
+  }
   if (run.findings.length === 0) {
     lines.push('No findings were recorded. This does not mean that unmeasured or failed scanners found no problems.');
   } else {

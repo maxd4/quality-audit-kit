@@ -53,6 +53,49 @@ function initializeGit(repository) {
   assert.equal(commit.status, 0, commit.stderr);
 }
 
+function measuredRevision(seed, status = 'VERIFIED') {
+  return {
+    status,
+    sha: status === 'VERIFIED' ? String(seed).repeat(40).slice(0, 40) : null,
+    basis: status === 'VERIFIED' ? 'independent test fixture commit' : 'fixture does not prove a source revision',
+  };
+}
+
+function measuredRun({ runId, repository = 'history-fixture', seed, findings = [], measurementStatus = 'MEASURED', sourceStatus = 'VERIFIED' }) {
+  const sourceRevision = measuredRevision(seed, sourceStatus);
+  return {
+    schemaVersion: '0.1-draft',
+    runId,
+    repository: { name: repository },
+    inputScope: 'COMMITTED_SNAPSHOT',
+    reproducible: sourceStatus === 'VERIFIED',
+    generatedAt: '2026-10-24T12:00:00.000Z',
+    engines: [{
+      name: 'knip',
+      measurementStatus,
+      gateOutcome: measurementStatus === 'MEASURED' ? 'INFORMATIVE' : 'NOT_EVALUATED',
+      sourceRevision,
+      scope: '.',
+    }],
+    findings: findings.map((finding) => ({
+      id: finding.id,
+      engine: 'knip',
+      ruleId: finding.ruleId || 'unused-export',
+      path: finding.path,
+      line: finding.line || 1,
+      severity: finding.severity || 'MEDIUM',
+      message: finding.message,
+      lifecycle: 'UNCLASSIFIED',
+      measurementStatus: 'MEASURED',
+      provenance: {
+        kind: 'EXECUTION',
+        reference: 'independent-fixture-scanner',
+        sourceRevision,
+      },
+    })),
+  };
+}
+
 test('init creates an explicit config and reports detected structure', () => {
   const repository = makeRepository();
   try {
@@ -60,6 +103,8 @@ test('init creates an explicit config and reports detected structure', () => {
     assert.equal(result.status, 0);
     const config = JSON.parse(fs.readFileSync(path.join(repository, 'quality-audit-kit.config.json'), 'utf8'));
     assert.equal(config.version, '0.1-draft');
+    assert.deepEqual(config.quality.ratchet.blockingSeverities, ['HIGH', 'CRITICAL']);
+    assert.equal(config.quality.ratchet.maxNewBlockingFindings, 0);
     const summary = JSON.parse(result.stdout);
     assert.deepEqual(summary.workspaces.packages, ['packages/app']);
     assert.deepEqual(summary.scanners.map((scanner) => scanner.name), ['knip', 'jscpd']);
@@ -363,6 +408,180 @@ test('scanner execution distinguishes expected findings exit from execution fail
     assert.equal(expectedKnip.measurementStatus, 'MEASURED');
     assert.match(expectedKnip.diagnostic, /expected findings code 1/);
     assert.equal(expectedRun.findings.length, 1);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('baseline comparison preserves line moves and correlates a unique file move', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const baselineRun = measuredRun({
+      runId: 'run-history-one',
+      seed: 'a',
+      findings: [
+        { id: 'knip:line-stable-finding', path: 'src/a.js', line: 4, message: 'unused export: helper' },
+        { id: 'knip:file-old-finding', path: 'src/old.js', line: 8, message: 'unused export: movedSymbol' },
+      ],
+    });
+    const currentRun = measuredRun({
+      runId: 'run-history-two',
+      seed: 'b',
+      findings: [
+        { id: 'knip:line-stable-finding', path: 'src/a.js', line: 44, message: 'unused export: helper' },
+        { id: 'knip:file-new-finding', path: 'src/new.js', line: 2, message: 'unused export: movedSymbol' },
+      ],
+    });
+    fs.writeFileSync(path.join(repository, 'baseline-source.json'), JSON.stringify(baselineRun, null, 2));
+    fs.writeFileSync(path.join(repository, 'current.json'), JSON.stringify(currentRun, null, 2));
+    assert.equal(runCli(repository, ['baseline', 'baseline-source.json', '--output', 'baseline.json']).status, 0);
+    const result = runCli(repository, ['triage', 'current.json', '--baseline', 'baseline.json']);
+    assert.equal(result.status, 0, result.stderr);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.status, 'PASS');
+    assert.equal(summary.findings.find((finding) => finding.id === 'knip:line-stable-finding').lifecycle, 'HISTORICAL_ACTIONABLE');
+    assert.equal(summary.findings.find((finding) => finding.id === 'knip:file-new-finding').lifecycle, 'HISTORICAL_ACTIONABLE');
+    assert.equal(summary.comparison.matches.find((match) => match.currentFindingId === 'knip:line-stable-finding').matchedBy, 'ID');
+    assert.equal(summary.comparison.matches.find((match) => match.currentFindingId === 'knip:file-new-finding').matchedBy, 'COMPARISON_KEY');
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('reintroduced findings fail the configured blocking ratchet and improvements stay proposals', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const finding = { id: 'knip:reintroduced-finding', path: 'src/a.js', line: 1, severity: 'HIGH', message: 'unused export: helper' };
+    const first = measuredRun({ runId: 'run-reintro-one', seed: 'c', findings: [finding] });
+    const resolved = measuredRun({ runId: 'run-reintro-two', seed: 'd', findings: [] });
+    const reintroduced = measuredRun({ runId: 'run-reintro-three', seed: 'e', findings: [finding] });
+    for (const [name, value] of [['first.json', first], ['resolved.json', resolved], ['reintroduced.json', reintroduced]]) {
+      fs.writeFileSync(path.join(repository, name), JSON.stringify(value, null, 2));
+    }
+    assert.equal(runCli(repository, ['baseline', 'first.json', '--output', 'baseline.json']).status, 0);
+    const improvement = runCli(repository, ['triage', 'resolved.json', '--baseline', 'baseline.json']);
+    const improvementSummary = JSON.parse(improvement.stdout);
+    assert.equal(improvement.status, 0);
+    assert.equal(improvementSummary.qualityGate.proposals[0].type, 'STRICTER_CEILING');
+    assert.equal(improvementSummary.qualityGate.proposals[0].action, 'EXPLICIT_REVIEW_REQUIRED');
+    assert.equal(runCli(repository, ['baseline', 'resolved.json', '--output', 'baseline.json', '--replace']).status, 0);
+    const result = runCli(repository, ['triage', 'reintroduced.json', '--baseline', 'baseline.json']);
+    assert.equal(result.status, 2);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.findings[0].lifecycle, 'REINTRODUCED');
+    assert.equal(summary.qualityGate.status, 'FAIL');
+    assert.equal(summary.qualityGate.newBlockingFindings[0].id, finding.id);
+    assert.match(summary.qualityGate.blockedReasons.join(' '), /blocking findings/);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('scan applies the ratchet to a complete local execution', () => {
+  const repository = makeRepository('scan-ratchet-fixture');
+  try {
+    const binDirectory = path.join(repository, 'node_modules', '.bin');
+    fs.mkdirSync(binDirectory, { recursive: true });
+    const writeScanner = (name, json) => {
+      fs.writeFileSync(path.join(binDirectory, `${name}.cmd`), `@echo ${json}\r\n@exit /b 0\r\n`);
+    };
+    writeScanner('knip', '{"issues":[{"file":"src.js","exports":[{"name":"old","line":1,"severity":"HIGH"}]}]}');
+    writeScanner('jscpd', '{"duplicates":[]}');
+    initializeGit(repository);
+    assert.equal(runCli(repository, ['scan', '--run=knip,jscpd', '--output', 'initial.json']).status, 0);
+    assert.equal(runCli(repository, ['baseline', 'initial.json', '--output', 'baseline.json']).status, 0);
+    fs.rmSync(path.join(repository, 'initial.json'), { force: true });
+    const baselineAdd = spawnSync('git', ['add', '-f', 'baseline.json'], { cwd: repository, encoding: 'utf8', windowsHide: true });
+    assert.equal(baselineAdd.status, 0, baselineAdd.stderr);
+    const baselineCommit = spawnSync('git', ['commit', '-qm', 'baseline'], { cwd: repository, encoding: 'utf8', windowsHide: true });
+    assert.equal(baselineCommit.status, 0, baselineCommit.stderr);
+
+    writeScanner('knip', '{"issues":[{"file":"src.js","exports":[{"name":"new","line":1,"severity":"HIGH"}]}]}');
+    const changedScanner = spawnSync('git', ['add', '-f', 'node_modules/.bin/knip.cmd'], { cwd: repository, encoding: 'utf8', windowsHide: true });
+    assert.equal(changedScanner.status, 0, changedScanner.stderr);
+    const scannerCommit = spawnSync('git', ['commit', '-qm', 'new-finding'], { cwd: repository, encoding: 'utf8', windowsHide: true });
+    assert.equal(scannerCommit.status, 0, scannerCommit.stderr);
+
+    const result = runCli(repository, ['scan', '--run=knip,jscpd', '--baseline', 'baseline.json', '--output', 'current.json']);
+    assert.equal(result.status, 2);
+    const run = JSON.parse(fs.readFileSync(path.join(repository, 'current.json'), 'utf8'));
+    assert.equal(run.comparison.status, 'COMPATIBLE');
+    assert.equal(run.qualityGate.status, 'FAIL');
+    assert.equal(run.findings[0].lifecycle, 'NEW');
+    assert.equal(run.engines.every((engine) => engine.sourceRevision.status === 'VERIFIED'), true);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('baseline replacement rejects a relaxed ceiling instead of ratifying it', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const run = measuredRun({ runId: 'run-policy-baseline', seed: '2', findings: [] });
+    fs.writeFileSync(path.join(repository, 'run.json'), JSON.stringify(run, null, 2));
+    assert.equal(runCli(repository, ['baseline', 'run.json', '--output', 'baseline.json']).status, 0);
+    fs.writeFileSync(path.join(repository, 'quality-audit-kit.config.json'), JSON.stringify({
+      quality: { ratchet: { blockingSeverities: ['HIGH', 'CRITICAL'], maxNewBlockingFindings: 1, maxMeasuredFindings: null } },
+    }, null, 2));
+    const result = runCli(repository, ['baseline', 'run.json', '--output', 'baseline.json', '--replace']);
+    assert.equal(result.status, 2);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.status, 'POLICY_RELAXATION_BLOCKED');
+    assert.match(summary.reasons.join(' '), /maxNewBlockingFindings/);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('incomplete audits are not comparable and cannot imply resolution', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const complete = measuredRun({
+      runId: 'run-complete',
+      seed: 'f',
+      findings: [{ id: 'knip:incomplete-finding', path: 'src/a.js', message: 'unused export: helper' }],
+    });
+    const incomplete = measuredRun({
+      runId: 'run-incomplete',
+      seed: '0',
+      findings: [],
+      measurementStatus: 'NOT_MEASURED',
+      sourceStatus: 'UNKNOWN',
+    });
+    fs.writeFileSync(path.join(repository, 'complete.json'), JSON.stringify(complete, null, 2));
+    fs.writeFileSync(path.join(repository, 'incomplete.json'), JSON.stringify(incomplete, null, 2));
+    assert.equal(runCli(repository, ['baseline', 'complete.json', '--output', 'baseline.json']).status, 0);
+    const result = runCli(repository, ['triage', 'incomplete.json', '--baseline', 'baseline.json']);
+    assert.equal(result.status, 2);
+    const summary = JSON.parse(result.stdout);
+    assert.equal(summary.status, 'NOT_EVALUATED');
+    assert.equal(summary.comparison.status, 'NOT_EVALUATED');
+    assert.equal(summary.comparison.resolved.length, 0);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('triage records the four supported decisions with evidence and stale control', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const run = measuredRun({
+      runId: 'run-triage-decision',
+      seed: '1',
+      findings: [{ id: 'knip:triage-finding', path: 'src/a.js', message: 'unused export: helper' }],
+    });
+    fs.writeFileSync(path.join(repository, 'run.json'), JSON.stringify(run, null, 2));
+    const written = runCli(repository, [
+      'triage', 'run.json', '--decisions', 'decisions.json', '--finding', 'knip:triage-finding',
+      '--decision', 'KEEP_JUSTIFIED', '--reason', 'Documented public compatibility surface.',
+      '--reviewer', 'reviewer', '--reviewed-revision', measuredRevision('1').sha,
+      '--review-after', '2026-10-23', '--evidence', 'SOURCE_INSPECTION|docs/contracts.md|PASS',
+    ]);
+    assert.equal(written.status, 2, written.stderr);
+    const decisions = JSON.parse(fs.readFileSync(path.join(repository, 'decisions.json'), 'utf8'));
+    assert.equal(decisions.decisions[0].decision, 'KEEP_JUSTIFIED');
+    assert.equal(decisions.decisions[0].evidence[0].reference, 'docs/contracts.md');
+    assert.match(JSON.parse(written.stdout).decisions[0].status, /STALE/);
   } finally {
     cleanup(repository);
   }

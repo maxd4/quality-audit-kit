@@ -25,7 +25,7 @@ A quality scan answers what an analyzer found. A maintenance workflow also needs
 | --- | --- | --- |
 | Import existing analyzer output | MVP | Knip and jscpd JSON reports |
 | Stable finding IDs and history | MVP | Stable IDs for the current normalized run |
-| Baseline and new vs historical comparison | MVP | Specified, not implemented |
+| Baseline and new vs historical comparison | MVP | Implemented locally, experimental |
 | Evidence-aware quality runs | MVP | Implemented draft run output with explicit measurement states |
 | Human decisions and stale justification detection | MVP | Draft JSON Schema |
 | JSON and Markdown reports | MVP | Implemented locally |
@@ -58,10 +58,12 @@ From this repository:
 node bin/quality-audit-kit.js init /path/to/repository
 node bin/quality-audit-kit.js scan /path/to/repository --output run.json
 node bin/quality-audit-kit.js scan /path/to/repository --run=knip,jscpd --output run.json
+node bin/quality-audit-kit.js baseline run.json --output quality-audit-kit.baseline.json
+node bin/quality-audit-kit.js triage run.json --baseline quality-audit-kit.baseline.json
 node bin/quality-audit-kit.js report run.json
 ```
 
-`init` writes an explicit `quality-audit-kit.config.json` and creates generic, protected `PROJECT_HANDOFF.md` and `COMMIT_REVIEW.md` templates in the target repository. It detects actual files, configurations, documentation, tests and rules; unproven fields remain `UNKNOWN`. Re-running `init` is safe: existing documents are protected, while `--update-templates --preview` shows a deterministic diff and `--update-templates` refreshes only managed generated blocks. `context refresh` updates only stale detected facts and controls, preserves human decisions and reports contradictions instead of rewriting instructions. `--agent codex` prepares an optional, explicit Codex customization handoff; the CLI never executes an agent or installs dependencies implicitly. `scan` writes JSON to stdout unless `--output` is provided, and does not modify analyzed source files. Existing `knip-report.json` and `jscpd-report.json` files are imported automatically; `--run` executes only locally installed scanner binaries and never installs dependencies. An absent, skipped or failed scanner remains visible as `NOT_MEASURED` or `FAILURE`; it is never treated as a clean result. See [CLI usage and contracts](docs/cli.md).
+`init` writes an explicit `quality-audit-kit.config.json` and creates generic, protected `PROJECT_HANDOFF.md` and `COMMIT_REVIEW.md` templates in the target repository. It detects actual files, configurations, documentation, tests and rules; unproven fields remain `UNKNOWN`. Re-running `init` is safe: existing documents are protected, while `--update-templates --preview` shows a deterministic diff and `--update-templates` refreshes only managed generated blocks. `context refresh` updates only stale detected facts and controls, preserves human decisions and reports contradictions instead of rewriting instructions. `--agent codex` prepares an optional, explicit Codex customization handoff; the CLI never executes an agent or installs dependencies implicitly. `scan` writes JSON to stdout unless `--output` is provided, and does not modify analyzed source files. Existing `knip-report.json` and `jscpd-report.json` files are imported automatically; `--run` executes only locally installed scanner binaries and never installs dependencies. An absent, skipped or failed scanner remains visible as `NOT_MEASURED` or `FAILURE`; it is never treated as a clean result. `baseline` requires a complete measured run, `triage` preserves evidence-backed decisions, and `scan --baseline` refuses incomplete comparisons and applies the configured ratchet without changing the baseline implicitly. See [CLI usage and contracts](docs/cli.md).
 
 ## Read the project
 
@@ -83,7 +85,7 @@ The [example run](examples/run.example.json) and [decision records](examples/dec
 python3 tools/validate_examples.py
 ```
 
-The Python harness checks a small set of cross-file invariants, while `npm test` runs real CLI integration tests for report import, stable IDs, discovery and negative measurement states. Neither is a universal quality gate for the analyzed repository.
+The Python harness checks a small set of cross-file invariants, while `npm test` runs real CLI integration tests for report import, stable IDs, discovery, negative measurement states, historical comparison, triage and ratchets. Neither is a universal quality gate for the analyzed repository; incomplete or unverified audits remain `NOT_EVALUATED`.
 
 ## Relationship to CleanMyMap
 

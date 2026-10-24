@@ -23,4 +23,4 @@ All stages are **planned**, not committed delivery dates.
 - **Secret leakage:** redact paths, env and raw logs; verify archives before publication.
 - **Adoption gap:** test real user problems rather than assuming differentiation.
 
-**Current boundary:** the first CLI is functional for discovery, protected generic template initialization, optional Codex proposal handoff, report import, explicit local execution and Markdown/JSON rendering. It remains experimental and does not claim a complete quality gate, baseline engine, triage workflow or published package.
+**Current boundary:** the first CLI is functional for discovery, protected generic template initialization, optional Codex proposal handoff, report import, explicit local execution, historical comparison, baseline replacement with preserved history, evidence-backed triage, configured ratchets and Markdown/JSON rendering. It remains experimental, local-first and does not claim a hosted service, universal quality gate or published npm package.

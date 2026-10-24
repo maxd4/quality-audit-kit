@@ -4,6 +4,15 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const { discover, findRepositoryRoot, resolveLocalBinary } = require('./discovery');
+const {
+  DECISIONS,
+  assessMeasuredRun,
+  compareRuns,
+  createBaseline,
+  evaluateDecisionStaleness,
+  normalizePolicy,
+  policyRelaxations,
+} = require('./history');
 const { loadOrRunScanner } = require('./scanners');
 const { renderMarkdown, writeOutput } = require('./report');
 const {
@@ -21,6 +30,8 @@ const {
 
 const SCANNERS = ['knip', 'jscpd'];
 const CONFIG_FILENAME = 'quality-audit-kit.config.json';
+const DEFAULT_BASELINE_FILENAME = 'quality-audit-kit.baseline.json';
+const DEFAULT_DECISIONS_FILENAME = 'quality-audit-kit.decisions.json';
 
 function parseArguments(argv) {
   const [command = 'help', ...tokens] = argv;
@@ -39,7 +50,7 @@ function parseArguments(argv) {
     }
     const name = token.slice(2);
     const next = tokens[index + 1];
-    if (next && !next.startsWith('--') && !['help', 'force', 'preview', 'update-templates', 'link-agents'].includes(name)) {
+    if (next && !next.startsWith('--') && !['help', 'force', 'preview', 'update-templates', 'link-agents', 'replace'].includes(name)) {
       options[name] = next;
       index += 1;
     } else {
@@ -102,6 +113,59 @@ function loadConfig(root) {
   return config;
 }
 
+function configuredQuality(root, config) {
+  const quality = config.quality && typeof config.quality === 'object' ? config.quality : {};
+  return {
+    baseline: quality.baseline || DEFAULT_BASELINE_FILENAME,
+    decisions: quality.decisions || DEFAULT_DECISIONS_FILENAME,
+    ratchet: normalizePolicy(quality.ratchet || {}),
+  };
+}
+
+function resolveRepositoryFile(root, value, fallback) {
+  const selected = value === undefined || value === true ? fallback : String(value);
+  const candidate = path.resolve(root, selected);
+  const relative = path.relative(root, candidate);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error('Quality Audit Kit artifact paths must remain inside the analyzed repository.');
+  }
+  return candidate;
+}
+
+function emptyDecisionBundle() {
+  return { schemaVersion: '0.1-draft', decisions: [] };
+}
+
+function loadDecisionBundle(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return emptyDecisionBundle();
+  const bundle = readJson(filePath);
+  if (!bundle || bundle.schemaVersion !== '0.1-draft' || !Array.isArray(bundle.decisions)) {
+    throw new Error('Decision file must contain schemaVersion 0.1-draft and a decisions array.');
+  }
+  return bundle;
+}
+
+function notEvaluatedComparison(reason, run, policy) {
+  return {
+    status: 'NOT_EVALUATED',
+    compatible: false,
+    reasons: [reason],
+    baselineRunId: null,
+    currentRunId: run?.runId || null,
+    matches: [],
+    resolved: [],
+    staleDecisions: [],
+    qualityGate: {
+      status: 'NOT_EVALUATED',
+      policy: normalizePolicy(policy),
+      blockedReasons: [],
+      newBlockingFindings: [],
+      proposals: [],
+      policyRelaxation: { relaxed: false, reasons: [] },
+    },
+  };
+}
+
 function resolveApprovedTargetFile(root, value) {
   const candidate = path.resolve(root, value);
   const relative = path.relative(root, candidate);
@@ -136,6 +200,7 @@ async function scanCommand(positional, options) {
   const discovery = discover(target);
   const contextCommitSha = gitCommit(target);
   const config = loadConfig(target);
+  const quality = configuredQuality(target, config);
   const executeScanners = scannerSelection(options.run);
   const explicitReports = {
     knip: options['knip-report'],
@@ -188,11 +253,39 @@ async function scanCommand(positional, options) {
     findings,
   };
 
+  const configuredBaseline = config.quality?.baseline;
+  const baselinePath = options.baseline !== undefined
+    ? resolveRepositoryFile(target, options.baseline, quality.baseline)
+    : configuredBaseline && fs.existsSync(resolveRepositoryFile(target, configuredBaseline, quality.baseline))
+      ? resolveRepositoryFile(target, configuredBaseline, quality.baseline)
+      : null;
+  if (baselinePath) {
+    if (!fs.existsSync(baselinePath)) {
+      run.comparison = notEvaluatedComparison(`Baseline file does not exist: ${path.relative(target, baselinePath)}`, run, quality.ratchet);
+      run.qualityGate = run.comparison.qualityGate;
+    } else {
+      const baseline = readJson(baselinePath);
+      const decisionsPath = options.decisions !== undefined
+        ? resolveRepositoryFile(target, options.decisions, quality.decisions)
+        : fs.existsSync(resolveRepositoryFile(target, quality.decisions, quality.decisions))
+          ? resolveRepositoryFile(target, quality.decisions, quality.decisions)
+          : null;
+      const decisions = loadDecisionBundle(decisionsPath);
+      const comparison = compareRuns(baseline, run, decisions, quality.ratchet);
+      if (comparison.classifiedFindings) run.findings = comparison.classifiedFindings;
+      const { classifiedFindings, qualityGate, ...serializableComparison } = comparison;
+      run.comparison = serializableComparison;
+      run.qualityGate = qualityGate;
+    }
+  }
+
   const content = `${JSON.stringify(run, null, 2)}\n`;
   const outputPath = options.output && options.output !== '-' ? path.resolve(process.cwd(), options.output) : null;
   if (outputPath) writeOutput(outputPath, content);
   else process.stdout.write(content);
-  if (engines.some((engine) => engine.measurementStatus === 'FAILURE')) process.exitCode = 2;
+  if (engines.some((engine) => engine.measurementStatus === 'FAILURE')
+    || run.comparison?.status === 'NOT_EVALUATED'
+    || ['FAIL', 'NOT_EVALUATED'].includes(run.qualityGate?.status)) process.exitCode = 2;
   return run;
 }
 
@@ -280,6 +373,15 @@ function initCommand(positional, options) {
       knip: { report: 'knip-report.json' },
       jscpd: { report: 'jscpd-report.json' },
     },
+    quality: {
+      baseline: DEFAULT_BASELINE_FILENAME,
+      decisions: DEFAULT_DECISIONS_FILENAME,
+      ratchet: {
+        blockingSeverities: ['HIGH', 'CRITICAL'],
+        maxNewBlockingFindings: 0,
+        maxMeasuredFindings: null,
+      },
+    },
   };
   const configExists = fs.existsSync(configPath);
   const configStatus = options.preview
@@ -365,6 +467,170 @@ function contextRefreshCommand(positional, options) {
   if (status === 'BLOCKED' || status === 'CONTRADICTIONS' || status === 'NOT_INITIALIZED') process.exitCode = 2;
 }
 
+function baselineCommand(positional, options) {
+  const target = findRepositoryRoot(options.repository || process.cwd());
+  const config = loadConfig(target);
+  const quality = configuredQuality(target, config);
+  const input = positional[0] || options.run;
+  if (!input) throw new Error('baseline requires an audit run JSON path.');
+  const run = readJson(path.resolve(process.cwd(), input));
+  const eligibility = assessMeasuredRun(run, 'source run');
+  const outputPath = resolveRepositoryFile(target, options.output, quality.baseline);
+  if (!eligibility.eligible) {
+    process.stdout.write(`${JSON.stringify({ command: 'baseline', status: 'NOT_ELIGIBLE', reasons: eligibility.reasons, output: path.relative(target, outputPath).split(path.sep).join('/') }, null, 2)}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const existing = fs.existsSync(outputPath) ? readJson(outputPath) : null;
+  if (existing && !options.replace) {
+    process.stdout.write(`${JSON.stringify({ command: 'baseline', status: 'EXISTS', output: path.relative(target, outputPath).split(path.sep).join('/'), existingRunId: existing.runId || null, reason: 'Baseline replacement requires explicit --replace; no baseline was changed.' }, null, 2)}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  if (existing && existing.baseline?.kind !== 'QUALITY_BASELINE') throw new Error('Existing baseline artifact is not a Quality Audit Kit baseline.');
+  if (existing) {
+    const relaxation = policyRelaxations(existing.baseline.policySnapshot, quality.ratchet);
+    if (relaxation.relaxed) {
+      process.stdout.write(`${JSON.stringify({ command: 'baseline', status: 'POLICY_RELAXATION_BLOCKED', reasons: relaxation.reasons, output: path.relative(target, outputPath).split(path.sep).join('/') }, null, 2)}\n`);
+      process.exitCode = 2;
+      return;
+    }
+  }
+  const next = createBaseline(run, existing, quality.ratchet);
+  if (options.preview) {
+    process.stdout.write(`${JSON.stringify({
+      command: 'baseline',
+      status: 'PREVIEW',
+      output: path.relative(target, outputPath).split(path.sep).join('/'),
+      replacingRunId: existing?.runId || null,
+      runId: run.runId,
+      historyCount: next.baseline.history.length,
+      diff: diffPreview(path.relative(target, outputPath), existing ? JSON.stringify(existing, null, 2) : '', JSON.stringify(next, null, 2)),
+    }, null, 2)}\n`);
+    return;
+  }
+  writeJson(outputPath, next);
+  process.stdout.write(`${JSON.stringify({
+    command: 'baseline',
+    status: existing ? 'REPLACED' : 'CREATED',
+    output: path.relative(target, outputPath).split(path.sep).join('/'),
+    runId: run.runId,
+    historyCount: next.baseline.history.length,
+    policy: next.baseline.policySnapshot,
+  }, null, 2)}\n`);
+}
+
+function parseEvidence(options) {
+  if (options['evidence-file']) {
+    const evidence = readJson(path.resolve(process.cwd(), options['evidence-file']));
+    if (!Array.isArray(evidence)) throw new Error('--evidence-file must contain an array.');
+    return evidence;
+  }
+  if (options.evidence) {
+    const parts = String(options.evidence).split('|');
+    if (parts.length !== 3) throw new Error('--evidence format is TYPE|REFERENCE|OUTCOME.');
+    return [{ type: parts[0], reference: parts[1], outcome: parts[2] }];
+  }
+  if (options['evidence-type'] || options['evidence-reference'] || options['evidence-outcome']) {
+    return [{
+      type: options['evidence-type'],
+      reference: options['evidence-reference'],
+      outcome: options['evidence-outcome'],
+    }];
+  }
+  throw new Error('triage decisions require evidence.');
+}
+
+function validateDecision(decision) {
+  if (!DECISIONS.includes(decision.decision)) throw new Error(`Unsupported decision: ${decision.decision}. Use ${DECISIONS.join(', ')}.`);
+  if (!decision.findingId || !decision.reason || !decision.reviewer) throw new Error('A triage decision requires finding, reason and reviewer.');
+  if (!/^[a-f0-9]{40}$/i.test(String(decision.reviewedRevision || ''))) throw new Error('reviewedRevision must be a 40-character Git SHA.');
+  if (!Array.isArray(decision.evidence) || decision.evidence.length === 0) throw new Error('A triage decision requires at least one evidence item.');
+  const evidenceTypes = ['SOURCE_INSPECTION', 'STATIC_CONTRACT', 'EXECUTED_BEHAVIOR', 'INTEGRATION_PROOF', 'UNKNOWN'];
+  const outcomes = ['PASS', 'FAIL', 'UNKNOWN'];
+  for (const evidence of decision.evidence) {
+    if (!evidenceTypes.includes(evidence.type) || !evidence.reference || !outcomes.includes(evidence.outcome)) throw new Error('Each evidence item requires a valid type, reference and outcome.');
+  }
+  if (decision.reviewAfter && !/^\d{4}-\d{2}-\d{2}$/.test(decision.reviewAfter)) throw new Error('reviewAfter must use YYYY-MM-DD.');
+}
+
+function triageCommand(positional, options) {
+  const target = findRepositoryRoot(options.repository || process.cwd());
+  const config = loadConfig(target);
+  const quality = configuredQuality(target, config);
+  const input = positional[0] || options.run;
+  if (!input) throw new Error('triage requires an audit run JSON path.');
+  const run = readJson(path.resolve(process.cwd(), input));
+  const baselinePath = options.baseline !== undefined
+    ? resolveRepositoryFile(target, options.baseline, quality.baseline)
+    : fs.existsSync(resolveRepositoryFile(target, quality.baseline, quality.baseline))
+      ? resolveRepositoryFile(target, quality.baseline, quality.baseline)
+      : null;
+  const decisionsPath = resolveRepositoryFile(target, options.decisions, quality.decisions);
+  const decisions = loadDecisionBundle(decisionsPath);
+  let decisionWriteStatus = 'UNCHANGED';
+  if (options.decision !== undefined) {
+    const reviewedRevision = options['reviewed-revision'];
+    const created = {
+      findingId: options.finding || options['finding-id'],
+      decision: String(options.decision).toUpperCase(),
+      reason: options.reason,
+      reviewer: options.reviewer,
+      reviewedRevision,
+      ...(options['review-after'] ? { reviewAfter: options['review-after'] } : {}),
+      evidence: parseEvidence(options),
+    };
+    validateDecision(created);
+    const known = [...(run.findings || [])];
+    if (baselinePath && fs.existsSync(baselinePath)) known.push(...(readJson(baselinePath).findings || []));
+    if (!known.some((finding) => finding.id === created.findingId)) throw new Error(`Finding ${created.findingId} is not present in the supplied run or baseline.`);
+    const duplicate = decisions.decisions.some((existing) => JSON.stringify(existing) === JSON.stringify(created));
+    if (!duplicate) {
+      decisions.decisions.push(created);
+      decisionWriteStatus = options.preview ? 'PREVIEW' : 'WRITTEN';
+      if (!options.preview) writeJson(decisionsPath, decisions);
+    }
+  }
+
+  let comparison;
+  if (!baselinePath) {
+    comparison = notEvaluatedComparison('No baseline artifact was supplied or configured.', run, quality.ratchet);
+  } else if (!fs.existsSync(baselinePath)) {
+    comparison = notEvaluatedComparison(`Baseline file does not exist: ${path.relative(target, baselinePath)}`, run, quality.ratchet);
+  } else {
+    const baseline = readJson(baselinePath);
+    comparison = compareRuns(baseline, run, decisions, quality.ratchet);
+  }
+  if (comparison.status === 'NOT_EVALUATED') {
+    comparison.staleDecisions = evaluateDecisionStaleness(decisions, run, null, comparison);
+  }
+  if (comparison.classifiedFindings) {
+    run.findings = comparison.classifiedFindings;
+    delete comparison.classifiedFindings;
+  }
+  const stale = comparison.staleDecisions || [];
+  const status = comparison.status === 'NOT_EVALUATED'
+    ? 'NOT_EVALUATED'
+    : stale.some((item) => item.status === 'STALE')
+      ? 'STALE_DECISIONS'
+      : comparison.qualityGate.status;
+  const result = {
+    command: 'triage',
+    status,
+    findings: run.findings,
+    decisions: stale,
+    decisionFile: path.relative(target, decisionsPath).split(path.sep).join('/'),
+    decisionWriteStatus,
+    comparison,
+    qualityGate: comparison.qualityGate,
+  };
+  const outputPath = options.output ? resolveRepositoryFile(target, options.output, 'triage-result.json') : null;
+  const content = `${JSON.stringify(result, null, 2)}\n`;
+  if (outputPath) writeOutput(outputPath, content);
+  else process.stdout.write(content);
+  if (['NOT_EVALUATED', 'STALE_DECISIONS', 'FAIL'].includes(status)) process.exitCode = 2;
+}
+
 function reportCommand(positional, options) {
   const inputPath = positional[0];
   if (!inputPath) throw new Error('report requires a run JSON path.');
@@ -378,7 +644,7 @@ function reportCommand(positional, options) {
 }
 
 function printHelp() {
-  process.stdout.write(`Quality Audit Kit ${require('../package.json').version} (experimental)\n\nUsage:\n  quality-audit-kit init [repository] [--force] [--templates deterministic|none] [--update-templates] [--preview]\n  quality-audit-kit init [repository] --agent codex [--agent-prompt file] [--agent-input file]\n  quality-audit-kit context refresh [repository] [--preview]\n  quality-audit-kit init [repository] --link-agents\n  quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--run[=knip,jscpd]]\n  quality-audit-kit report run.json [--format markdown|json] [--output file]\n\ninit creates protected generic PROJECT_HANDOFF.md and COMMIT_REVIEW.md templates. Existing documents are never overwritten by default; --update-templates refreshes only managed generated blocks and preserves manual sections. --preview emits deterministic diff previews without mutation.\ncontext refresh updates only detected facts and controls, reports changed values and contradictions, and preserves all instructions and manual decisions.\n--agent codex prepares a Codex customization request; it does not execute an agent or contact a service unless explicit input is supplied with --agent-input.\nscan imports existing JSON reports by default. --run explicitly executes installed local scanners; it never installs dependencies.\nNo scanner, failed scanner, or unmeasured scanner is treated as a clean result.\n`);
+  process.stdout.write(`Quality Audit Kit ${require('../package.json').version} (experimental)\n\nUsage:\n  quality-audit-kit init [repository] [--force] [--templates deterministic|none] [--update-templates] [--preview]\n  quality-audit-kit init [repository] --agent codex [--agent-prompt file] [--agent-input file]\n  quality-audit-kit context refresh [repository] [--preview]\n  quality-audit-kit init [repository] --link-agents\n  quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--run[=knip,jscpd]] [--baseline file] [--decisions file]\n  quality-audit-kit baseline run.json [--output file] [--replace] [--preview]\n  quality-audit-kit triage run.json [--baseline file] [--decisions file] [--finding id --decision FIX|DEFER|KEEP_JUSTIFIED|FALSE_POSITIVE --reason text --reviewer name --reviewed-revision sha --evidence TYPE|REFERENCE|OUTCOME]\n  quality-audit-kit report run.json [--format markdown|json] [--output file]\n\ninit creates protected generic PROJECT_HANDOFF.md and COMMIT_REVIEW.md templates. Existing documents are never overwritten by default; --update-templates refreshes only managed generated blocks and preserves manual sections. --preview emits deterministic diff previews without mutation.\ncontext refresh updates only detected facts and controls, reports changed values and contradictions, and preserves all instructions and manual decisions.\n--agent codex prepares a Codex customization request; it does not execute an agent or contact a service unless explicit input is supplied with --agent-input.\nscan imports existing JSON reports by default. --run explicitly executes installed local scanners; it never installs dependencies. With --baseline it compares only complete, compatible measurements and applies the configured ratchet.\nbaseline creates an explicit, versioned baseline; replacing one requires --replace and never increases a configured ceiling automatically. triage appends an evidence-backed decision or reports stale decisions.\nNo scanner, failed scanner, incomplete audit, or unmeasured scanner is treated as a clean result.\n`);
 }
 
 async function main(argv) {
@@ -391,6 +657,8 @@ async function main(argv) {
     return contextRefreshCommand(positional.slice(1), options);
   }
   if (command === 'scan') return scanCommand(positional, options);
+  if (command === 'baseline') return baselineCommand(positional, options);
+  if (command === 'triage') return triageCommand(positional, options);
   if (command === 'report') return reportCommand(positional, options);
   throw new Error(`Unknown command: ${command}. Use --help for usage.`);
 }

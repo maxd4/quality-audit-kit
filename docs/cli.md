@@ -11,7 +11,9 @@ quality-audit-kit init [repository] [--force] [--templates deterministic|none] [
 quality-audit-kit init [repository] --agent codex [--agent-prompt file] [--agent-input file]
 quality-audit-kit init [repository] --link-agents
 quality-audit-kit context refresh [repository] [--preview]
-quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--run[=knip,jscpd]]
+quality-audit-kit scan [repository] [--output file] [--knip-report file] [--jscpd-report file] [--run[=knip,jscpd]] [--baseline file] [--decisions file]
+quality-audit-kit baseline run.json [--output file] [--replace] [--preview]
+quality-audit-kit triage run.json [--baseline file] [--decisions file] [--finding id --decision FIX|DEFER|KEEP_JUSTIFIED|FALSE_POSITIVE --reason text --reviewer name --reviewed-revision sha --evidence TYPE|REFERENCE|OUTCOME]
 quality-audit-kit report run.json [--format markdown|json] [--output file]
 ```
 
@@ -40,6 +42,30 @@ The Knip adapter accepts the JSON reporter shape with grouped `issues` and issue
 
 `--run` is the only mode that executes scanners. It resolves `node_modules/.bin/knip` and `node_modules/.bin/jscpd` in the target repository and invokes them directly. It never calls `npx`, `npm install` or a shell command supplied by the analyzed project. Exit code 1 is treated as an expected findings/threshold result for these adapters when a valid JSON report is available; other non-zero codes are `FAILURE`, even if they also emitted JSON. A partial JSON payload after a real execution error is never normalized as a complete measurement. A local scanner may still fail; that result is recorded as `FAILURE` and the command exits with status 2. A scanner that is absent, not requested or skipped is recorded as `NOT_MEASURED` with `gateOutcome: NOT_EVALUATED`.
 
+With `--baseline`, `scan` compares the run only when the baseline and current run have the same repository, input scope and complete `MEASURED` engines with `VERIFIED` source revisions. Imported reports with unknown source revisions and incomplete analyses produce `NOT_EVALUATED`; they never produce `RESOLVED`. Compatible findings are classified as `NEW`, `HISTORICAL_ACTIONABLE`, `HISTORICAL_JUSTIFIED`, `RESOLVED` or `REINTRODUCED`. Exact IDs preserve line moves. A unique comparison key can preserve history across a file move; ambiguous matches remain unclassified as new rather than being guessed.
+
+`baseline run.json` creates `quality-audit-kit.baseline.json` (or `--output`) only from a complete measured run. An existing baseline is protected; replacement requires `--replace`. Replacements preserve prior run snapshots for reintroduction detection and capture the ratchet policy. `baseline --preview` shows the proposed artifact without writing it.
+
+`triage run.json` evaluates a run against a baseline and reports stale decisions. With `--finding`, it appends one evidence-backed decision to the decision bundle without deleting earlier evidence. The supported public decisions are `FIX`, `DEFER`, `KEEP_JUSTIFIED` and `FALSE_POSITIVE`; each requires a reason, reviewer, reviewed Git revision and at least one evidence item. Expired `reviewAfter` values, disappeared justified findings and changed file scope are `STALE` and cannot silently justify a gate.
+
+The configured ratchet lives under `quality.ratchet` in `quality-audit-kit.config.json`:
+
+```json
+{
+  "quality": {
+    "baseline": "quality-audit-kit.baseline.json",
+    "decisions": "quality-audit-kit.decisions.json",
+    "ratchet": {
+      "blockingSeverities": ["HIGH", "CRITICAL"],
+      "maxNewBlockingFindings": 0,
+      "maxMeasuredFindings": null
+    }
+  }
+}
+```
+
+New or reintroduced blocking findings fail the gate when they exceed `maxNewBlockingFindings`. A measured reduction may emit a `STRICTER_CEILING` proposal, but the CLI never changes a baseline, raises a ceiling or weakens a policy automatically.
+
 By default `scan` writes the run JSON to stdout. This avoids changing the analyzed worktree. Use an explicit `--output` path to save a run artifact.
 
 `report` renders a saved run as Markdown by default or reproduces normalized JSON with `--format json`. Reports retain negative measurement states and explicitly warn when no measured findings are available.
@@ -50,7 +76,7 @@ The CLI emits `schemaVersion: 0.1-draft`, `inputScope: WORKTREE_LIVE` and `repro
 
 Finding IDs are SHA-256 fingerprints of the engine, rule, normalized repository-relative path and a stable rule-specific locus. Line movement alone is not part of the fingerprint. jscpd fingerprints include the normalized duplicate pair and available fragment/token information; path moves and scanner-specific changes can still legitimately change an ID.
 
-No baseline comparison, triage mutation, SARIF export, package publication, hosted service or automatic remediation is implemented yet.
+SARIF export, package publication, hosted service and automatic remediation remain unimplemented. Baseline replacement and triage writes are explicit local mutations; scanning itself does not modify analyzed source code.
 
 ## References for imported formats
 
