@@ -955,7 +955,7 @@ test('thresholds recommend separates current measurements, objectives and ratche
     fs.writeFileSync(path.join(repository, 'run.json'), `${JSON.stringify(run, null, 2)}\n`);
     fs.writeFileSync(path.join(repository, 'baseline.json'), `${JSON.stringify({
       runId: 'baseline-001',
-      thresholds: { metrics: [{ name: 'duplication_ratio', unit: 'percent', direction: 'LOWER_IS_BETTER', language: 'javascript', workspace: 'packages/app', fileCategory: 'runtime', value: 10 }] },
+      thresholds: { metrics: [{ name: 'duplication_ratio', unit: 'percent', direction: 'LOWER_IS_BETTER', language: 'javascript', workspace: 'packages/app', fileCategory: 'runtime', scope: 'COMMITTED_SNAPSHOT', value: 10 }] },
     }, null, 2)}\n`);
 
     const result = runCli(repository, ['thresholds', 'recommend', 'run.json', '--baseline', 'baseline.json', '--output', 'recommendations.json', '--export', 'proposed.json', '--profile', 'balanced']);
@@ -1036,6 +1036,100 @@ test('thresholds recommend exposes atypical, absent and inferred category measur
     const categorizedRecommendation = JSON.parse(categorizedResult.stdout);
     assert.deepEqual(new Set(categorizedRecommendation.series.map((series) => series.dimensions.fileCategory)), new Set(['runtime', 'tests', 'configuration', 'generated']));
     assert(categorizedRecommendation.proposals.filter((proposal) => proposal.dimensions.fileCategory === 'generated').every((proposal) => proposal.status === 'EXCLUDED_BY_DEFAULT'));
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('threshold application preserves the strictest ratchet, dimensions and unrelated policy fields', () => {
+  const repository = makeEmptyRepository();
+  try {
+    const run = measuredRun({ runId: 'threshold-ratchet-001', seed: '1' });
+    run.metrics = [
+      { name: 'latency', values: [8, 8, 8, 8], unit: 'ms', direction: 'LOWER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'runtime' },
+      { name: 'latency', values: [80, 80, 80, 80], unit: 'ms', direction: 'LOWER_IS_BETTER', language: 'python', workspace: 'root', fileCategory: 'runtime' },
+      { name: 'coverage', values: [65, 65, 65, 65], unit: 'percent', direction: 'HIGHER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'runtime' },
+    ];
+    fs.writeFileSync(path.join(repository, 'run.json'), `${JSON.stringify(run, null, 2)}\n`);
+    fs.writeFileSync(path.join(repository, 'baseline.json'), `${JSON.stringify({
+      runId: 'threshold-baseline-001',
+      thresholds: { metrics: [
+        { name: 'latency', unit: 'ms', direction: 'LOWER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'runtime', scope: 'COMMITTED_SNAPSHOT', value: 10 },
+        { name: 'latency', unit: 'ms', direction: 'LOWER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'runtime', scope: 'COMMITTED_SNAPSHOT', value: 6 },
+        { name: 'latency', unit: 'ms', direction: 'LOWER_IS_BETTER', language: 'python', workspace: 'root', fileCategory: 'runtime', scope: 'COMMITTED_SNAPSHOT', value: 100 },
+        { name: 'coverage', unit: 'percent', direction: 'HIGHER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'runtime', scope: 'COMMITTED_SNAPSHOT', value: 60 },
+      ] },
+    }, null, 2)}\n`);
+    const initialConfig = {
+      projectField: 'preserve-project-field',
+      quality: {
+        unrelatedQualityField: 'preserve-quality-field',
+        thresholds: {
+          userField: 'preserve-threshold-field',
+          profile: 'old',
+          ratchet: {
+            userRatchetField: 'preserve-ratchet-field',
+            metrics: [
+              { metric: 'latency', unit: 'ms', direction: 'LOWER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'runtime', scope: 'COMMITTED_SNAPSHOT', value: 1 },
+              { metric: 'coverage', unit: 'percent', direction: 'HIGHER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'runtime', scope: 'COMMITTED_SNAPSHOT', value: 70 },
+              { metric: 'unrelated', unit: 'count', direction: 'LOWER_IS_BETTER', language: 'javascript', workspace: 'root', fileCategory: 'tests', scope: 'COMMITTED_SNAPSHOT', value: 42 },
+            ],
+          },
+          approval: { priorDecision: 'retain-me' },
+        },
+      },
+    };
+    const configPath = path.join(repository, 'quality-audit-kit.config.json');
+    fs.writeFileSync(configPath, `${JSON.stringify(initialConfig, null, 2)}\n`);
+    const beforeApproval = fs.readFileSync(configPath, 'utf8');
+
+    const withoutApproval = runCli(repository, ['thresholds', 'recommend', 'run.json', '--baseline', 'baseline.json', '--apply', '--profile', 'balanced']);
+    assert.notEqual(withoutApproval.status, 0);
+    assert.match(withoutApproval.stderr, /--approve/);
+    assert.equal(fs.readFileSync(configPath, 'utf8'), beforeApproval);
+
+    const recommendationRun = runCli(repository, ['thresholds', 'recommend', 'run.json', '--baseline', 'baseline.json']);
+    assert.equal(recommendationRun.status, 0, recommendationRun.stderr);
+    const recommendation = JSON.parse(recommendationRun.stdout);
+    const javascriptLatency = recommendation.proposals.find((proposal) => proposal.metric.name === 'latency' && proposal.dimensions.language === 'javascript' && proposal.profile === 'balanced');
+    const pythonLatency = recommendation.proposals.find((proposal) => proposal.metric.name === 'latency' && proposal.dimensions.language === 'python' && proposal.profile === 'balanced');
+    const coverage = recommendation.proposals.find((proposal) => proposal.metric.name === 'coverage' && proposal.profile === 'balanced');
+    assert.equal(javascriptLatency.statisticalProposal.value, 8);
+    assert.equal(javascriptLatency.recommendedObjective.value, 1);
+    assert.deepEqual(new Set(javascriptLatency.historicalRatchetCap.candidates.map((candidate) => candidate.value)), new Set([1, 6, 10]));
+    assert.equal(pythonLatency.historicalRatchetCap.value, 100);
+    assert.equal(pythonLatency.recommendedObjective.value, 80);
+    assert.equal(coverage.historicalRatchetCap.value, 70);
+    assert.equal(coverage.recommendedObjective.value, 70);
+
+    const applied = runCli(repository, ['thresholds', 'recommend', 'run.json', '--baseline', 'baseline.json', '--apply', '--approve', '--profile', 'balanced']);
+    assert.equal(applied.status, 0, applied.stderr);
+    const appliedConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.equal(appliedConfig.projectField, 'preserve-project-field');
+    assert.equal(appliedConfig.quality.unrelatedQualityField, 'preserve-quality-field');
+    assert.equal(appliedConfig.quality.thresholds.userField, 'preserve-threshold-field');
+    assert.equal(appliedConfig.quality.thresholds.ratchet.userRatchetField, 'preserve-ratchet-field');
+    assert.equal(appliedConfig.quality.thresholds.approval.priorDecision, 'retain-me');
+    assert.equal(appliedConfig.quality.thresholds.ratchet.metrics.find((metric) => metric.metric === 'latency' && metric.language === 'javascript').value, 1);
+    assert.equal(appliedConfig.quality.thresholds.ratchet.metrics.find((metric) => metric.metric === 'coverage').value, 70);
+    assert.equal(appliedConfig.quality.thresholds.ratchet.metrics.find((metric) => metric.metric === 'unrelated').value, 42);
+
+    const stricterConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    stricterConfig.quality.thresholds.ratchet.metrics.find((metric) => metric.metric === 'latency' && metric.language === 'javascript').value = 10;
+    fs.writeFileSync(configPath, `${JSON.stringify(stricterConfig, null, 2)}\n`);
+    const stricter = runCli(repository, ['thresholds', 'recommend', 'run.json', '--apply', '--approve', '--profile', 'balanced']);
+    assert.equal(stricter.status, 0, stricter.stderr);
+    const stricterApplied = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    assert.equal(stricterApplied.quality.thresholds.ratchet.metrics.find((metric) => metric.metric === 'latency' && metric.language === 'javascript').value, 8);
+
+    const invalidConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    invalidConfig.quality.thresholds.ratchet.metrics[0].value = 'not-a-number';
+    fs.writeFileSync(configPath, `${JSON.stringify(invalidConfig, null, 2)}\n`);
+    const beforeInvalidApply = fs.readFileSync(configPath, 'utf8');
+    const invalidApply = runCli(repository, ['thresholds', 'recommend', 'run.json', '--apply', '--approve']);
+    assert.notEqual(invalidApply.status, 0);
+    assert.match(invalidApply.stderr, /invalid|mutation/i);
+    assert.equal(fs.readFileSync(configPath, 'utf8'), beforeInvalidApply);
   } finally {
     cleanup(repository);
   }

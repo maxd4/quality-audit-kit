@@ -81,6 +81,44 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
+function writeJsonAtomicReplace(filePath, value) {
+  const target = path.resolve(filePath);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const lockPath = `${target}.qak-lock`;
+  const tempPath = `${target}.qak-tmp-${process.pid}-${crypto.randomBytes(8).toString('hex')}`;
+  const lockToken = `${process.pid}:${crypto.randomBytes(8).toString('hex')}`;
+  let lockFd;
+  let tempFd;
+  try {
+    const existing = fs.existsSync(target) ? fs.lstatSync(target) : null;
+    if (existing?.isSymbolicLink()) throw new Error('Refusing to replace a symbolic-link configuration file.');
+    try {
+      lockFd = fs.openSync(lockPath, 'wx');
+      fs.writeFileSync(lockFd, lockToken, 'utf8');
+      fs.fsyncSync(lockFd);
+    } catch (error) {
+      if (error.code === 'EEXIST') throw new Error(`Refusing concurrent configuration write: ${target}`);
+      throw error;
+    }
+    tempFd = fs.openSync(tempPath, 'wx');
+    const content = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    fs.writeSync(tempFd, content, 0, content.length);
+    fs.fsyncSync(tempFd);
+    fs.closeSync(tempFd);
+    tempFd = undefined;
+    fs.renameSync(tempPath, target);
+  } finally {
+    if (tempFd !== undefined) { try { fs.closeSync(tempFd); } catch {} }
+    try { if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true }); } catch {}
+    if (lockFd !== undefined) {
+      try { fs.closeSync(lockFd); } catch {}
+      try {
+        if (fs.readFileSync(lockPath, 'utf8') === lockToken) fs.rmSync(lockPath, { force: true });
+      } catch {}
+    }
+  }
+}
+
 function scannerSelection(value) {
   if (value === undefined) return new Set();
   if (value === true) return new Set(SCANNERS);
@@ -992,6 +1030,70 @@ function reportCommand(positional, options) {
   else process.stdout.write(content);
 }
 
+const THRESHOLD_DIMENSIONS = ['language', 'workspace', 'fileCategory', 'scope'];
+
+function thresholdSeriesMatches(left, right) {
+  const leftName = left?.name ?? left?.metric;
+  const rightName = right?.metric ?? right?.name;
+  if (!left || !right || leftName !== rightName || left.unit !== right.unit || left.direction !== right.direction) return false;
+  return THRESHOLD_DIMENSIONS.every((dimension) => String(left[dimension] ?? 'UNKNOWN') === String(right[dimension] ?? 'UNKNOWN'));
+}
+
+function strictestThresholdValue(thresholds, direction) {
+  const values = thresholds.map((threshold) => Number(threshold.value));
+  return direction === 'HIGHER_IS_BETTER' ? Math.max(...values) : Math.min(...values);
+}
+
+function validateThresholdEntry(threshold, label) {
+  const name = threshold?.name ?? threshold?.metric;
+  if (!threshold || typeof threshold !== 'object' || Array.isArray(threshold) || typeof name !== 'string' || !name || typeof threshold.unit !== 'string' || !['LOWER_IS_BETTER', 'HIGHER_IS_BETTER'].includes(threshold.direction) || typeof threshold.value !== 'number' || !Number.isFinite(threshold.value) || threshold.value < 0) throw new Error(`${label} is invalid; no normative mutation was applied.`);
+  for (const dimension of THRESHOLD_DIMENSIONS) if (threshold[dimension] !== undefined && typeof threshold[dimension] !== 'string') throw new Error(`${label} has an invalid ${dimension}; no normative mutation was applied.`);
+}
+
+function mergeApprovedThresholdConfig(config, result, proposal, profile) {
+  const existingQuality = config.quality && typeof config.quality === 'object' && !Array.isArray(config.quality) ? config.quality : {};
+  const existingThresholds = existingQuality.thresholds === undefined
+    ? {}
+    : existingQuality.thresholds && typeof existingQuality.thresholds === 'object' && !Array.isArray(existingQuality.thresholds)
+      ? existingQuality.thresholds
+      : (() => { throw new Error('Existing quality.thresholds configuration is invalid; no normative mutation was applied.'); })();
+  const existingRatchet = existingThresholds.ratchet === undefined
+    ? {}
+    : existingThresholds.ratchet && typeof existingThresholds.ratchet === 'object' && !Array.isArray(existingThresholds.ratchet)
+      ? existingThresholds.ratchet
+      : (() => { throw new Error('Existing quality.thresholds.ratchet configuration is invalid; no normative mutation was applied.'); })();
+  const existingMetrics = existingRatchet.metrics === undefined
+    ? []
+    : Array.isArray(existingRatchet.metrics)
+      ? existingRatchet.metrics
+      : (() => { throw new Error('Existing quality.thresholds.ratchet.metrics configuration is invalid; no normative mutation was applied.'); })();
+  existingMetrics.forEach((threshold, index) => validateThresholdEntry(threshold, `Existing threshold ${index}`));
+  const proposedMetrics = proposal.thresholds.map((threshold) => ({ ...threshold }));
+  proposedMetrics.forEach((threshold, index) => validateThresholdEntry(threshold, `Proposed threshold ${index}`));
+  for (const proposed of proposedMetrics) {
+    const compatible = existingMetrics.filter((candidate) => thresholdSeriesMatches(candidate, proposed));
+    if (!compatible.length) continue;
+    const current = strictestThresholdValue(compatible, proposed.direction);
+    const relaxes = proposed.direction === 'HIGHER_IS_BETTER' ? proposed.value < current : proposed.value > current;
+    if (relaxes) throw new Error(`Refusing to relax approved threshold for ${proposed.metric} (${proposed.direction}); explicit policy review is required.`);
+  }
+  const seriesKey = (threshold) => JSON.stringify({ metric: threshold.metric ?? threshold.name, unit: threshold.unit, direction: threshold.direction, ...Object.fromEntries(THRESHOLD_DIMENSIONS.map((dimension) => [dimension, threshold[dimension] ?? 'UNKNOWN'])) });
+  const concerned = new Set(proposedMetrics.map(seriesKey));
+  const untouched = existingMetrics.filter((threshold) => !concerned.has(seriesKey(threshold)));
+  return {
+    ...config,
+    quality: {
+      ...existingQuality,
+      thresholds: {
+        ...existingThresholds,
+        profile,
+        ratchet: { ...existingRatchet, metrics: [...untouched, ...proposedMetrics], runId: result.runId },
+        approval: { ...(existingThresholds.approval || {}), kind: 'EXPLICIT_CLI_APPROVAL', runId: result.runId },
+      },
+    },
+  };
+}
+
 function thresholdsCommand(positional, options) {
   if (positional[0] !== 'recommend') throw new Error('thresholds requires the recommend subcommand.');
   const input = positional[1] || options.run;
@@ -1032,12 +1134,8 @@ function thresholdsCommand(positional, options) {
     if (!['progressive', 'balanced', 'strict'].includes(profile)) throw new Error(`Unsupported thresholds profile: ${profile}`);
     const proposal = buildThresholdConfig(result, profile);
     if (!proposal.thresholds.length) throw new Error('No sufficiently measured threshold proposal is available for normative application.');
-    const updated = { ...config, quality: { ...(config.quality || {}), thresholds: {
-      profile,
-      ratchet: { metrics: proposal.thresholds, runId: result.runId },
-      approval: { kind: 'EXPLICIT_CLI_APPROVAL', runId: result.runId },
-    } } };
-    writeJson(path.join(target, CONFIG_FILENAME), updated);
+    const updated = mergeApprovedThresholdConfig(config, result, proposal, profile);
+    writeJsonAtomicReplace(path.join(target, CONFIG_FILENAME), updated);
   }
   return result;
 }

@@ -248,29 +248,39 @@ function capCandidates(baseline, config) {
     }
   }
   const legacy = baseline?.baseline?.policySnapshot?.maxMeasuredFindings ?? baseline?.policySnapshot?.maxMeasuredFindings;
-  if (legacy !== null && legacy !== undefined) candidates.push({ name: 'finding_count', unit: 'findings', value: legacy, direction: 'LOWER_IS_BETTER', kind: 'BASELINE_POLICY', sourceRunId: baseline?.runId || baseline?.baseline?.runId || null });
+  if (legacy !== null && legacy !== undefined) candidates.push({ name: 'finding_count', unit: 'findings', value: legacy, direction: 'LOWER_IS_BETTER', kind: 'BASELINE_POLICY', sourceRunId: baseline?.runId || baseline?.baseline?.runId || null, global: true });
   return candidates;
 }
 
 function candidateMatches(candidate, series) {
   if (String(candidate.name || candidate.metric) !== series.name) return false;
-  if (candidate.unit && candidate.unit !== series.unit) return false;
+  if (candidate.unit !== series.unit || !candidate.direction || normalizeDirection(candidate.direction, series.name) !== series.direction) return false;
+  if (candidate.global === true) return true;
   for (const key of ['language', 'workspace', 'fileCategory', 'scope']) {
-    if (candidate[key] !== undefined && normalizeDimension(candidate[key]) !== series.dimensions[key]) return false;
+    if (candidate[key] === undefined || normalizeDimension(candidate[key]) !== series.dimensions[key]) return false;
   }
   return true;
 }
 
 function historicalCap(series, baseline, config) {
-  const candidate = capCandidates(baseline, config).find((item) => candidateMatches(item, series));
-  if (!candidate) return { status: 'UNKNOWN', value: null, reason: 'No compatible historical ratchet cap was provided.' };
+  const compatible = capCandidates(baseline, config).filter((item) => candidateMatches(item, series));
+  if (!compatible.length) return { status: 'UNKNOWN', value: null, reason: 'No compatible historical ratchet cap was provided.', candidates: [] };
+  const values = compatible.map((candidate) => candidate.value);
+  const value = series.direction === 'HIGHER_IS_BETTER' ? Math.max(...values) : Math.min(...values);
+  const selected = compatible.filter((candidate) => candidate.value === value);
   return {
     status: 'KNOWN',
-    value: round(candidate.value),
+    value: round(value),
     unit: series.unit,
-    direction: normalizeDirection(candidate.direction, series.name),
-    source: candidate.kind,
-    sourceRunId: candidate.sourceRunId,
+    direction: series.direction,
+    source: selected.length === 1 ? selected[0].kind : 'STRICTEST_OF_COMPATIBLE_CAPS',
+    sourceRunId: selected.length === 1 ? selected[0].sourceRunId : null,
+    constraint: series.direction === 'HIGHER_IS_BETTER' ? 'MAXIMUM_FLOOR' : 'MINIMUM_CEILING',
+    candidates: compatible.map((candidate) => ({
+      value: round(candidate.value),
+      kind: candidate.kind,
+      sourceRunId: candidate.sourceRunId || null,
+    })),
   };
 }
 
@@ -339,6 +349,7 @@ function proposalFor(series, profile, cap) {
       sourceTypes: [...new Set(series.samples.map((sample) => sample.source))],
     },
     recommendedObjective: objective ? { value: objective.value, unit: series.unit, direction: series.direction, basis: objective.basis, rawValue: objective.rawValue } : null,
+    statisticalProposal: objective ? { value: objective.rawValue, unit: series.unit, direction: series.direction, basis: objective.basis } : null,
     historicalRatchetCap: cap,
     exceedances: {
       aboveHistoricalRatchet: capExceeded.length,
