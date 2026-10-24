@@ -12,20 +12,51 @@ quality-audit-kit report run.json --format markdown --output report.md
 ```
 
 The analyzer is dependency-free and uses the versioned `qak-lexical-ast`
-adapter. It supports `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.tsx`, `.mts` and
+structural adapter. It supports `.js`, `.mjs`, `.cjs`, `.jsx`, `.ts`, `.tsx`, `.mts` and
 `.cts`. The adapter is intentionally conservative: comments and literals are
 tokenized, delimiters are balanced, and files with an unmatched delimiter or
 unterminated literal are recorded as `FAILURE`; they do not yield zero-valued
 measurements. This is a lightweight structural adapter, not a claim of
 equivalence with Babel, TypeScript or CodeScene.
 
-For every measured function, the run can contain three separate records in
+For every measured function, the run contains separate records in
 `functionMeasurements`:
 
 - `cognitiveComplexity`: decision and nesting points; lower is better;
 - `cyclomaticComplexity`: one plus independent decision operators; lower is
   better;
 - `functionLength`: inclusive source line span; lower is better.
+- `decisionCount`: count of the following decision-bearing AST constructs:
+  `if` (including `else if`), `switch`, `case`, `default`, `for` (including
+  `for...of` and `for...in`), `while`, `do...while`, `catch`, ternary
+  conditions, and each `&&`, `||` or `??` logical operator. `else` alone is
+  not a decision and the trailing `while` of a `do...while` is counted only
+  once.
+- `maxDecisionDepth`: maximum nesting of control-flow decision constructs.
+  Sequential decisions at the same level remain at the same depth; `else if`
+  chains are treated as the same decision level. Logical and ternary points
+  contribute at their enclosing control-flow depth without creating a block
+  level by themselves.
+- `nestedDecisionCount`: decision points at depth greater than one in the
+  containing function.
+- `maxSubtreeDecisionCount`: the largest number of decision points in one
+  deterministic control-flow subtree, inclusive of its root. The measurement
+  also carries `subtreeStartLine`, `subtreeEndLine` and `subtreeRootKind` so
+  the concentration can be inspected without rerunning the analyzer.
+
+The four structural metrics are descriptive and are not a second scanner or a
+CodeScene-compatible score. They use the same tokenized AST adapter, function
+identity, source interval and provenance as the existing complexity metrics.
+Nested functions and callbacks are measured independently; their decision
+points are excluded from the containing function. A function with no decision
+has measured zeros for all four structural metrics. A syntax or parser error
+has no fabricated zero measurements and is recorded in coverage as `FAILURE`.
+
+The offline structured report adds `structuralComplexity`, an informative
+projection containing only functions with multiple structural signals. It
+does not create findings, priorities, thresholds, gate outcomes or automatic
+refactoring decisions. Explanations are emitted only when all four structural
+values are present and measured.
 
 Each record carries the engine and metric versions, language, relative path,
 versioned function identity, inferred structural role, start and end lines,
@@ -61,6 +92,8 @@ the corpus:
 npm run benchmark:maintainability
 ```
 
-The corpus size can be adjusted with `QAK_BENCHMARK_FILES=250`. Benchmark
-numbers are environment-dependent; the JSON output is the evidence to retain
-when comparing runs.
+The corpus size can be adjusted with `QAK_BENCHMARK_FILES=250`. The benchmark
+runs the same corpus several times with the original complexity records and
+with the structural pass enabled, then reports median elapsed overhead in
+milliseconds and percent. Benchmark numbers are environment-dependent; the
+JSON output is the evidence to retain when comparing runs.

@@ -6,6 +6,7 @@ const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const { buildCloneAudit, renderCloneMarkdown } = require('../src/clone-triage');
+const { assessMeasuredRun } = require('../src/history');
 const { normalizeJscpd } = require('../src/normalize');
 
 function runWithFindings(findings) {
@@ -64,6 +65,45 @@ test('normalisation preserves exact clone ranges, provenance and native fingerpr
   assert.deepEqual(findings[0].clone.nativeFingerprint, { value: 'jscpd-fp-1', source: 'REPORT', verified: true });
   assert.equal(findings[0].rawReference, 'jscpd://duplicates/0');
   assert.equal(findings.diagnostics.length, 0);
+});
+
+test('normalisation gives distinct clone pairs distinct deterministic IDs', () => {
+  const report = {
+    duplicates: [
+      { lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 1, end: 5 }, secondFile: { name: 'src/b.js', start: 20, end: 24 } },
+      { lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 10, end: 14 }, secondFile: { name: 'src/b.js', start: 30, end: 34 } },
+    ],
+  };
+  const provenance = { kind: 'REPORT', reference: 'fixture', sourceRevision: { status: 'VERIFIED', sha: 'a'.repeat(40), basis: 'fixture' } };
+  const first = normalizeJscpd('C:/repo', report, provenance);
+  const second = normalizeJscpd('C:/repo', { duplicates: [...report.duplicates].reverse() }, provenance);
+  assert.equal(first.length, 2);
+  assert.equal(new Set(first.map((finding) => finding.id)).size, 2);
+  assert.deepEqual(new Set(first.map((finding) => finding.id)), new Set(second.map((finding) => finding.id)));
+  assert.notEqual(first[0].clone.identity.pair, first[1].clone.identity.pair);
+});
+
+test('strictly repeated pairs are deduplicated while native identities remain distinct', () => {
+  const duplicate = { fingerprint: 'native-1', lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 1, end: 5 }, secondFile: { name: 'src/b.js', start: 20, end: 24 } };
+  const findings = normalizeJscpd('C:/repo', { duplicates: [duplicate, JSON.parse(JSON.stringify(duplicate))] }, { kind: 'REPORT', reference: 'fixture', sourceRevision: { status: 'UNKNOWN', sha: null, basis: 'fixture' } });
+  assert.equal(findings.length, 1);
+  assert.equal(findings.diagnostics.filter((diagnostic) => diagnostic.code === 'CLONE_DUPLICATE_DEDUPLICATED').length, 1);
+  const differentFingerprint = normalizeJscpd('C:/repo', { duplicates: [duplicate, { ...duplicate, fingerprint: 'native-2' }] }, { kind: 'REPORT', reference: 'fixture', sourceRevision: { status: 'UNKNOWN', sha: null, basis: 'fixture' } });
+  assert.equal(differentFingerprint.length, 2);
+  assert.notEqual(differentFingerprint[0].id, differentFingerprint[1].id);
+});
+
+test('normalized clone findings remain eligible for historical comparison without duplicate IDs', () => {
+  const provenance = { kind: 'REPORT', reference: 'fixture', sourceRevision: { status: 'VERIFIED', sha: 'b'.repeat(40), basis: 'fixture' } };
+  const findings = normalizeJscpd('C:/repo', {
+    duplicates: [
+      { lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 1, end: 5 }, secondFile: { name: 'src/b.js', start: 20, end: 24 } },
+      { lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 10, end: 14 }, secondFile: { name: 'src/b.js', start: 30, end: 34 } },
+    ],
+  }, provenance);
+  const assessment = assessMeasuredRun({ schemaVersion: '0.1-draft', repository: { name: 'fixture' }, engines: [{ name: 'jscpd', measurementStatus: 'MEASURED', sourceRevision: provenance.sourceRevision }], findings }, 'run');
+  assert.equal(assessment.reasons.some((reason) => reason.includes('duplicate finding ID')), false);
+  assert.equal(assessment.eligible, true);
 });
 
 test('normalisation reports incomplete clone paths, ranges and metrics without fabricating them', () => {

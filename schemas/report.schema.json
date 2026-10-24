@@ -48,7 +48,10 @@
             "contentSha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" }
           }
         },
-        "evidenceRef": { "type": "string", "minLength": 1 }
+        "evidenceRef": { "type": "string", "minLength": 1 },
+        "subtreeStartLine": { "type": ["integer", "null"], "minimum": 1 },
+        "subtreeEndLine": { "type": ["integer", "null"], "minimum": 1 },
+        "subtreeRootKind": { "type": ["string", "null"] }
       }
     },
     "maintainabilityCoverage": {
@@ -133,6 +136,31 @@
     },
     "maintainabilityCoverage": {
       "$ref": "#/$defs/maintainabilityCoverage"
+    },
+    "structuralComplexity": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "functionId", "functionName", "astRole", "startLine", "endLine", "decisionCount", "maxDecisionDepth", "nestedDecisionCount", "maxSubtreeDecisionCount", "signals", "explanation"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "functionId": { "type": "string", "minLength": 1 },
+          "functionName": { "type": "string", "minLength": 1 },
+          "astRole": { "type": "string", "minLength": 1 },
+          "startLine": { "type": "integer", "minimum": 1 },
+          "endLine": { "type": "integer", "minimum": 1 },
+          "decisionCount": { "type": "number", "minimum": 0 },
+          "maxDecisionDepth": { "type": "number", "minimum": 0 },
+          "nestedDecisionCount": { "type": "number", "minimum": 0 },
+          "maxSubtreeDecisionCount": { "type": "number", "minimum": 0 },
+          "maxSubtreeStartLine": { "type": ["integer", "null"], "minimum": 1 },
+          "maxSubtreeEndLine": { "type": ["integer", "null"], "minimum": 1 },
+          "maxSubtreeRootKind": { "type": ["string", "null"] },
+          "signals": { "type": "array", "items": { "type": "string" }, "minItems": 2 },
+          "explanation": { "type": "string", "minLength": 1 }
+        }
+      }
     },
     "findings": {
       "type": "object",

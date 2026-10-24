@@ -42,7 +42,16 @@ Each finding has:
 - source location and an optional `rawReference` to recover original evidence;
 - optional original engine fingerprint, never assumed globally unique.
 
-Proposed fingerprint input: `engine + ruleId + normalized repo-relative path + stable rule-specific locus`. This needs testing against path moves, renames, line shifts, duplicate findings and scanner version updates. Path-only fingerprints are insufficient; commit SHA must **not** be part of stable identity.
+For jscpd, the stable finding identity additionally includes the canonical clone
+pair (both normalized paths and line endpoints, sorted independently of report
+order) and, when available, the native clone fingerprint. The clone metadata
+distinguishes the stable clone identity, occurrence identities, pair identity and
+family/grouping identity. Exact repeated pairs are retained once in canonical
+findings; inverted pairs remain deduplicated by clone triage. Moving a clone's
+line range can legitimately change its finding ID when no native fingerprint or
+fragment provides stronger evidence of continuity. A report-array index is never
+the identity discriminator. Path-only fingerprints are insufficient; commit SHA
+must **not** be part of stable identity.
 
 `RESOLVED` means absent in a comparable completed measurement, **not** absent when the engine did not run.
 

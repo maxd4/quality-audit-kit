@@ -4,7 +4,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const ENGINE_NAME = 'maintainability';
-const ENGINE_VERSION = '1.0.0';
+const ENGINE_VERSION = '1.1.0';
 const PARSER_NAME = 'qak-lexical-ast';
 const PARSER_VERSION = '1.0.0';
 const FUNCTION_ID_VERSION = 'v1';
@@ -365,7 +365,7 @@ function extractFunctions(tokens, pairs) {
     }
   }
   for (let index = 1; index < tokens.length; index += 1) {
-    if (tokens[index].value !== '(' || tokens[index - 1].type !== 'identifier' || CONTROL_METHOD_NAMES.has(tokens[index - 1].value)) continue;
+    if (tokens[index].value !== '(' || tokens[index - 1].type !== 'identifier' || CONTROL_METHOD_NAMES.has(tokens[index - 1].value) || ['function', '*'].includes(tokens[index - 2]?.value)) continue;
     const end = pairs.get(index); const bodyStart = end !== undefined ? end + 1 : undefined;
     if (bodyStart === undefined || tokens[bodyStart]?.value !== '{') continue;
     const bodyEnd = pairs.get(bodyStart); if (bodyEnd === undefined) continue;
@@ -374,10 +374,147 @@ function extractFunctions(tokens, pairs) {
   return functions.sort((left, right) => left.startToken - right.startToken || left.endToken - right.endToken);
 }
 
-function complexity(tokens, functionInfo) {
+function statementEnd(tokens, start, pairs, limit) {
+  if (start === undefined || start >= limit) return Math.max(start || 0, start || 0);
+  if (tokens[start]?.value === '{') return Math.min(pairs.get(start) ?? limit - 1, limit - 1);
+  const value = tokens[start]?.value;
+  if (value === 'if') {
+    const conditionStart = start + 1;
+    const conditionEnd = tokens[conditionStart]?.value === '(' ? pairs.get(conditionStart) : conditionStart;
+    let end = statementEnd(tokens, (conditionEnd ?? start) + 1, pairs, limit);
+    if (tokens[end + 1]?.value === 'else') end = statementEnd(tokens, end + 2, pairs, limit);
+    return end;
+  }
+  let parentheses = 0; let brackets = 0;
+  for (let index = start; index < limit; index += 1) {
+    const valueAtIndex = tokens[index].value;
+    if (valueAtIndex === '(') parentheses += 1;
+    else if (valueAtIndex === ')') parentheses -= 1;
+    else if (valueAtIndex === '[') brackets += 1;
+    else if (valueAtIndex === ']') brackets -= 1;
+    if (valueAtIndex === ';' && parentheses === 0 && brackets === 0) return index;
+    if (index > start && parentheses === 0 && brackets === 0 && valueAtIndex === '}') return index - 1;
+    if (tokens[index].value === '{' && parentheses === 0 && brackets === 0) return Math.min(pairs.get(index) ?? limit - 1, limit - 1);
+  }
+  return limit - 1;
+}
+
+function decisionHeader(tokens, index, pairs, limit) {
+  const value = tokens[index]?.value;
+  if (['if', 'for', 'while', 'switch', 'catch'].includes(value)) {
+    const conditionStart = index + 1;
+    const conditionEnd = tokens[conditionStart]?.value === '(' ? pairs.get(conditionStart) : conditionStart;
+    const bodyStart = (conditionEnd ?? index) + 1;
+    return { conditionStart, conditionEnd, bodyStart, endToken: statementEnd(tokens, bodyStart, pairs, limit) };
+  }
+  if (value === 'do') return { conditionStart: index, conditionEnd: index, bodyStart: index + 1, endToken: statementEnd(tokens, index + 1, pairs, limit) };
+  return null;
+}
+
+function isNestedFunctionToken(index, functionInfo, functions) {
+  return functions.some((candidate) => candidate !== functionInfo
+    && candidate.startToken > functionInfo.startToken
+    && candidate.endToken <= functionInfo.endToken
+    && index >= candidate.startToken && index <= candidate.endToken);
+}
+
+function structuralComplexity(tokens, functionInfo, functions, pairs) {
+  const limit = functionInfo.bodyEnd;
+  const events = [];
+  const primary = [];
+  const switchContexts = [];
+  const doLoops = [];
+  const inFunction = (index) => index > functionInfo.bodyStart && index < limit && !isNestedFunctionToken(index, functionInfo, functions);
+
+  for (let index = functionInfo.bodyStart + 1; index < limit; index += 1) {
+    if (!inFunction(index)) continue;
+    const value = tokens[index].value;
+    if (['if', 'for', 'while', 'switch', 'catch', 'do'].includes(value)) {
+      const header = decisionHeader(tokens, index, pairs, limit);
+      if (!header) continue;
+      if (value === 'while' && doLoops.some((loop) => loop.trailingWhileToken === index)) continue;
+      const item = { index, kind: value === 'do' ? 'doWhile' : value, startToken: index, endToken: header.endToken, bodyStart: header.bodyStart, conditionStart: header.conditionStart, conditionEnd: header.conditionEnd };
+      if (value === 'do') {
+        const bodyEnd = header.endToken;
+        const trailingWhileToken = tokens[bodyEnd + 1]?.value === 'while' ? bodyEnd + 1 : undefined;
+        item.endToken = trailingWhileToken !== undefined ? statementEnd(tokens, trailingWhileToken, pairs, limit) : bodyEnd;
+        item.trailingWhileToken = trailingWhileToken;
+        doLoops.push(item);
+      }
+      primary.push(item);
+      if (value === 'switch') switchContexts.push(item);
+      continue;
+    }
+    if (value === 'case' || value === 'default') {
+      primary.push({ index, kind: value, startToken: index, endToken: limit - 1, bodyStart: index + 1 });
+      continue;
+    }
+    if (value === '?' && tokens[index - 1]?.value !== '?.' && tokens[index + 1]?.value !== '.') events.push({ index, kind: 'ternary', startToken: index, endToken: findExpressionEnd(tokens, index, pairs) });
+    else if (['&&', '||', '??'].includes(value)) events.push({ index, kind: 'logical', startToken: index, endToken: findExpressionEnd(tokens, index, pairs) });
+  }
+
+  for (const item of primary) {
+    if (!['case', 'default'].includes(item.kind)) continue;
+    const owner = switchContexts.find((candidate) => item.index > candidate.bodyStart && item.index < candidate.endToken);
+    if (!owner) { item.endToken = Math.min(limit - 1, statementEnd(tokens, item.index + 1, pairs, limit)); continue; }
+    const nextLabel = primary.find((candidate) => candidate !== item
+      && ['case', 'default'].includes(candidate.kind)
+      && candidate.index > item.index && candidate.index < owner.endToken);
+    item.endToken = nextLabel ? nextLabel.index - 1 : owner.endToken;
+  }
+  for (const item of primary) {
+    item.endToken = Math.max(item.startToken, Math.min(item.endToken ?? limit - 1, limit - 1));
+    item.isElseIf = item.kind === 'if' && tokens[item.index - 1]?.value === 'else';
+  }
+
+  const sortedPrimary = primary.sort((left, right) => left.index - right.index);
+  for (const item of sortedPrimary) {
+    const containers = sortedPrimary.filter((candidate) => candidate !== item && candidate.startToken < item.startToken && candidate.endToken >= item.endToken);
+    let parent = containers.sort((left, right) => (left.endToken - left.startToken) - (right.endToken - right.startToken))[0];
+    if (item.isElseIf && parent?.kind === 'if') parent = sortedPrimary.find((candidate) => candidate !== item && candidate.startToken < parent.startToken && candidate.endToken >= parent.endToken && !candidate.isElseIf);
+    item.parent = parent || null;
+    item.depth = (parent?.depth || 0) + 1;
+    events.push(item);
+  }
+  for (const event of events) {
+    if (event.kind === 'logical' || event.kind === 'ternary') {
+      const owner = sortedPrimary.filter((candidate) => candidate.startToken < event.index && candidate.endToken >= event.index)
+        .sort((left, right) => right.startToken - left.startToken)[0];
+      event.depth = owner?.depth || 1;
+    }
+  }
+  events.sort((left, right) => left.index - right.index || left.kind.localeCompare(right.kind));
+  const decisions = events.map((event) => ({ ...event, line: tokens[event.index].line }));
+  const subtreeCandidates = [
+    ...sortedPrimary.filter((item) => item.endToken >= item.startToken),
+    ...events.filter((event) => event.kind === 'logical' || event.kind === 'ternary'),
+  ].map((item) => {
+    const contained = decisions.filter((event) => event.index >= item.startToken && event.index <= item.endToken);
+    return {
+      count: contained.length,
+      startLine: tokens[item.startToken].line,
+      endLine: tokens[item.endToken].line,
+      rootKind: item.kind,
+    };
+  });
+  subtreeCandidates.sort((left, right) => right.count - left.count || left.startLine - right.startLine || left.endLine - right.endLine || left.rootKind.localeCompare(right.rootKind));
+  const subtree = subtreeCandidates[0] || { count: 0, startLine: null, endLine: null, rootKind: null };
+  return {
+    decisionCount: decisions.length,
+    maxDecisionDepth: decisions.reduce((max, event) => Math.max(max, event.depth || 1), 0),
+    nestedDecisionCount: decisions.filter((event) => (event.depth || 1) > 1).length,
+    maxSubtreeDecisionCount: subtree.count,
+    maxSubtreeStartLine: subtree.startLine,
+    maxSubtreeEndLine: subtree.endLine,
+    maxSubtreeRootKind: subtree.rootKind,
+  };
+}
+
+function complexity(tokens, functionInfo, functions) {
   let cyclomatic = 1; let cognitive = 0; let nesting = 0;
   const decisionWords = new Set(['if', 'for', 'while', 'case', 'catch']);
   for (let index = functionInfo.bodyStart + 1; index < functionInfo.bodyEnd; index += 1) {
+    if (isNestedFunctionToken(index, functionInfo, functions)) continue;
     const value = tokens[index].value;
     if (value === '{') nesting += 1;
     if (value === '}') nesting = Math.max(0, nesting - 1);
@@ -388,7 +525,7 @@ function complexity(tokens, functionInfo) {
   return { cyclomatic, cognitive };
 }
 
-function metricRecord({ path: filePath, language, functionInfo, tokens, metricId, value, unit, direction, sourceRevision, contentSha256 }) {
+function metricRecord({ path: filePath, language, functionInfo, tokens, metricId, value, unit, direction, sourceRevision, contentSha256, details = {} }) {
   const startLine = tokens[functionInfo.startToken].line;
   const endLine = tokens[functionInfo.endToken].line;
   const functionId = `${FUNCTION_ID_VERSION}:${digest([filePath, functionInfo.role, functionInfo.name, tokens[functionInfo.startToken].start, tokens[functionInfo.endToken].end].join('|')).slice(0, 24)}`;
@@ -417,10 +554,11 @@ function metricRecord({ path: filePath, language, functionInfo, tokens, metricId
       contentSha256,
     },
     evidenceRef,
+    ...details,
   };
 }
 
-function analyzeFile(file, sourceRevision) {
+function analyzeFile(file, sourceRevision, options = {}) {
   const source = fs.readFileSync(file.absolutePath, 'utf8');
   const contentSha256 = digest(source);
   const tokens = tokenize(source, file.path);
@@ -429,11 +567,18 @@ function analyzeFile(file, sourceRevision) {
   const measurements = [];
   const diagnostics = [];
   for (const functionInfo of functions) {
-    const values = complexity(tokens, functionInfo);
+    const values = complexity(tokens, functionInfo, functions);
     const length = tokens[functionInfo.endToken].line - tokens[functionInfo.startToken].line + 1;
     measurements.push(metricRecord({ path: file.path, language: file.language, functionInfo, tokens, metricId: 'cognitiveComplexity', value: values.cognitive, unit: 'score', direction: 'LOWER_IS_BETTER', sourceRevision, contentSha256 }));
     measurements.push(metricRecord({ path: file.path, language: file.language, functionInfo, tokens, metricId: 'cyclomaticComplexity', value: values.cyclomatic, unit: 'score', direction: 'LOWER_IS_BETTER', sourceRevision, contentSha256 }));
     measurements.push(metricRecord({ path: file.path, language: file.language, functionInfo, tokens, metricId: 'functionLength', value: length, unit: 'lines', direction: 'LOWER_IS_BETTER', sourceRevision, contentSha256 }));
+    if (options.structural !== false) {
+      const structural = structuralComplexity(tokens, functionInfo, functions, pairs);
+      measurements.push(metricRecord({ path: file.path, language: file.language, functionInfo, tokens, metricId: 'decisionCount', value: structural.decisionCount, unit: 'decisions', direction: 'LOWER_IS_BETTER', sourceRevision, contentSha256 }));
+      measurements.push(metricRecord({ path: file.path, language: file.language, functionInfo, tokens, metricId: 'maxDecisionDepth', value: structural.maxDecisionDepth, unit: 'levels', direction: 'LOWER_IS_BETTER', sourceRevision, contentSha256 }));
+      measurements.push(metricRecord({ path: file.path, language: file.language, functionInfo, tokens, metricId: 'nestedDecisionCount', value: structural.nestedDecisionCount, unit: 'decisions', direction: 'LOWER_IS_BETTER', sourceRevision, contentSha256 }));
+      measurements.push(metricRecord({ path: file.path, language: file.language, functionInfo, tokens, metricId: 'maxSubtreeDecisionCount', value: structural.maxSubtreeDecisionCount, unit: 'decisions', direction: 'LOWER_IS_BETTER', sourceRevision, contentSha256, details: { subtreeStartLine: structural.maxSubtreeStartLine, subtreeEndLine: structural.maxSubtreeEndLine, subtreeRootKind: structural.maxSubtreeRootKind } }));
+    }
     if (values.cognitive >= 15) diagnostics.push({ kind: 'MAINTAINABILITY_DIAGNOSTIC', code: 'HIGH_COGNITIVE_COMPLEXITY', path: file.path, functionId: measurements[measurements.length - 3].functionId, message: `Function ${functionInfo.name} has cognitive complexity ${values.cognitive}.` });
     if (length >= 50) diagnostics.push({ kind: 'MAINTAINABILITY_DIAGNOSTIC', code: 'LONG_FUNCTION', path: file.path, functionId: measurements[measurements.length - 3].functionId, message: `Function ${functionInfo.name} spans ${length} lines.` });
   }
@@ -476,7 +621,7 @@ function analyzeRepository(root, options = {}) {
   for (const file of discovered.files) {
     const inventory = coverage.eligibleFiles.find((entry) => entry.path === file.path);
     try {
-      const result = analyzeFile(file, sourceRevision);
+      const result = analyzeFile(file, sourceRevision, options);
       inventory.status = 'MEASURED'; inventory.functionsMeasured = result.functions;
       measuredPaths.add(file.path); measurements.push(...result.measurements); diagnostics.push(...result.diagnostics);
     } catch (error) {

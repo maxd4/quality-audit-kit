@@ -99,7 +99,10 @@
             "contentSha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" }
           }
         },
-        "evidenceRef": { "type": "string", "minLength": 1 }
+        "evidenceRef": { "type": "string", "minLength": 1 },
+        "subtreeStartLine": { "type": ["integer", "null"], "minimum": 1 },
+        "subtreeEndLine": { "type": ["integer", "null"], "minimum": 1 },
+        "subtreeRootKind": { "type": ["string", "null"] }
       }
     },
     "maintainabilityCoverage": {

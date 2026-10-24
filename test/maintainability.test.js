@@ -59,7 +59,7 @@ test('maintainability measures JS, MJS, TS, TSX, arrows and nested callbacks wit
     assert.ok(result.measurements.some((measurement) => measurement.astRole === 'CALLBACK'));
     assert.ok(result.measurements.some((measurement) => measurement.astRole === 'ARROW_FUNCTION'));
     assert.ok(result.measurements.some((measurement) => measurement.path === 'src/complex.mjs' && measurement.metricId === 'cognitiveComplexity' && measurement.value > 0));
-    assert.deepEqual(result.coverage.engines, [{ name: 'maintainability', version: '1.0.0', parser: 'qak-lexical-ast@1.0.0' }]);
+    assert.deepEqual(result.coverage.engines, [{ name: 'maintainability', version: '1.1.0', parser: 'qak-lexical-ast@1.0.0' }]);
     if (fixture.linkCreated) {
       assert.equal(result.coverage.excludedFiles.some((file) => file.path === 'src/external.js' && file.reason === 'SYMLINK_NOT_FOLLOWED'), true);
       assert.equal(result.measurements.some((measurement) => measurement.path === 'src/external.js'), false);
@@ -135,5 +135,140 @@ test('CLI accepts --run=maintainability without installing or invoking another a
     assert.equal(run.engines.some((engine) => engine.name === 'knip' && engine.measurementStatus === 'NOT_MEASURED'), true);
   } finally {
     cleanup(fixture);
+  }
+});
+
+function structuralValues(result, functionName) {
+  const measurements = result.measurements.filter((measurement) => measurement.functionName === functionName);
+  return Object.fromEntries(measurements.filter((measurement) => ['decisionCount', 'maxDecisionDepth', 'nestedDecisionCount', 'maxSubtreeDecisionCount'].includes(measurement.metricId)).map((measurement) => [measurement.metricId, measurement]));
+}
+
+test('structural metrics distinguish flat, nested, concentrated and expression decisions', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-structural-fixture-'));
+  try {
+    fs.writeFileSync(path.join(root, 'structural.js'), `
+export function flat(a, b, c, d) {
+  if (a) return 1;
+  if (b) return 2;
+  if (c) return 3;
+  if (d) return 4;
+  return 0;
+}
+export function nested(value) {
+  if (value) {
+    for (const item of value.items) {
+      if (item.active) return item;
+    }
+  }
+  return null;
+}
+export function expressions(a, b, c, d) {
+  return a && b ? c ?? d : false;
+}
+export function sameCyclomaticFlat(a, b) {
+  if (a) return 1;
+  if (b) return 2;
+  return 0;
+}
+export function sameCyclomaticNested(a, b) {
+  if (a) {
+    if (b) return 2;
+  }
+  return 0;
+}
+`, 'utf8');
+    const result = analyzeRepository(root);
+    const flat = structuralValues(result, 'flat');
+    const nested = structuralValues(result, 'nested');
+    const expressions = structuralValues(result, 'expressions');
+    const sameFlat = structuralValues(result, 'sameCyclomaticFlat');
+    const sameNested = structuralValues(result, 'sameCyclomaticNested');
+    assert.equal(flat.decisionCount.value, 4);
+    assert.equal(flat.maxDecisionDepth.value, 1);
+    assert.equal(flat.nestedDecisionCount.value, 0);
+    assert.equal(flat.maxSubtreeDecisionCount.value, 1);
+    assert.equal(nested.decisionCount.value, 3);
+    assert.equal(nested.maxDecisionDepth.value, 3);
+    assert.equal(nested.nestedDecisionCount.value, 2);
+    assert.equal(nested.maxSubtreeDecisionCount.value, 3);
+    assert.equal(expressions.decisionCount.value, 3);
+    assert.equal(expressions.maxDecisionDepth.value, 1);
+    assert.equal(expressions.nestedDecisionCount.value, 0);
+    assert.equal(expressions.maxSubtreeDecisionCount.value, 3);
+    assert.equal(result.measurements.find((measurement) => measurement.functionName === 'sameCyclomaticFlat' && measurement.metricId === 'cyclomaticComplexity').value, 3);
+    assert.equal(result.measurements.find((measurement) => measurement.functionName === 'sameCyclomaticNested' && measurement.metricId === 'cyclomaticComplexity').value, 3);
+    assert.equal(sameFlat.maxDecisionDepth.value, 1);
+    assert.equal(sameNested.maxDecisionDepth.value, 2);
+    assert.ok(nested.maxSubtreeDecisionCount.subtreeStartLine >= 1);
+    assert.ok(nested.maxSubtreeDecisionCount.subtreeEndLine >= nested.maxSubtreeDecisionCount.subtreeStartLine);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('structural semantics count switch labels, else-if chains, try/catch and exclude callback decisions from the parent', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-structural-semantics-'));
+  try {
+    fs.writeFileSync(path.join(root, 'semantics.mjs'), `
+export function classify(value, items) {
+  if (value === 1) return 'one';
+  else if (value === 2) return 'two';
+  else return items;
+  switch (value) {
+    case 1: return 1;
+    case 2: return 2;
+    default: return 0;
+  }
+}
+export function guarded(value) {
+  try { return value(); } catch (error) { return null; }
+}
+export function parent(items) {
+  if (items) return items.map((item) => { if (item.active) return item; return null; });
+  return [];
+}
+export function loopKinds(items) {
+  for (const key in items) {
+    while (items[key]) {
+      do { items[key] = false; } while (items[key]);
+    }
+  }
+}
+`, 'utf8');
+    const result = analyzeRepository(root);
+    const classify = structuralValues(result, 'classify');
+    const guarded = structuralValues(result, 'guarded');
+    const parent = structuralValues(result, 'parent');
+    const loopKinds = structuralValues(result, 'loopKinds');
+    const callback = result.measurements.find((measurement) => measurement.functionName === 'anonymous' && measurement.metricId === 'decisionCount');
+    assert.equal(classify.decisionCount.value, 6);
+    assert.equal(classify.maxDecisionDepth.value, 2);
+    assert.equal(guarded.decisionCount.value, 1);
+    assert.equal(parent.decisionCount.value, 1);
+    assert.equal(loopKinds.decisionCount.value, 3);
+    assert.equal(loopKinds.maxDecisionDepth.value, 3);
+    assert.ok(callback);
+    assert.equal(callback.value, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('structural complexity is projected in JSON and Markdown without creating findings', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-structural-report-'));
+  try {
+    fs.writeFileSync(path.join(root, 'source.tsx'), 'export const View = (value: boolean) => value ? <span /> : <div />;\n', 'utf8');
+    const result = analyzeRepository(root, { sourceRevision: verifiedRevision('c') });
+    const run = {
+      schemaVersion: '0.1-draft', runId: 'structural-report-001', repository: { name: 'structural-report', contextCommitSha: verifiedRevision('c').sha }, inputScope: 'COMMITTED_SNAPSHOT', reproducible: true, generatedAt: '2026-10-24T12:00:00.000Z',
+      engines: [{ name: 'maintainability', version: '1.1.0', measurementStatus: result.status, gateOutcome: 'INFORMATIVE', gateRelevant: false, sourceRevision: verifiedRevision('c'), scope: 'function' }], findings: [], functionMeasurements: result.measurements, maintainabilityCoverage: result.coverage,
+    };
+    const structured = buildStructuredReport(run);
+    assert.ok(Array.isArray(structured.structuralComplexity));
+    assert.match(renderMarkdown(run), /Structural complexity/);
+    assert.match(renderTerminal(run), /Structural complexity/);
+    assert.deepEqual(run.findings, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

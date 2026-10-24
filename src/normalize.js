@@ -22,6 +22,18 @@ function stableId(engine, ruleId, filePath, locus) {
   return `${engine}:${crypto.createHash('sha256').update(input).digest('hex')}`;
 }
 
+function jscpdOccurrenceKey(occurrence) {
+  return [occurrence?.path || 'UNKNOWN', occurrence?.startLine ?? '?', occurrence?.endLine ?? '?'].join(':');
+}
+
+function jscpdPairKey(occurrences) {
+  return occurrences.map(jscpdOccurrenceKey).sort().join('|');
+}
+
+function jscpdMetricIdentity({ pairKey, fragment, lines, percentage, tokens, chars }) {
+  return crypto.createHash('sha256').update(JSON.stringify({ pairKey, fragment, lines, percentage, tokens, chars })).digest('hex');
+}
+
 function severity(value, fallback = 'INFO') {
   const normalized = String(value || '').toUpperCase();
   if (SEVERITIES.includes(normalized)) return normalized;
@@ -222,7 +234,9 @@ function normalizeJscpd(root, report, provenance) {
   const duplicates = Array.isArray(report) ? report : report?.duplicates;
   if (!Array.isArray(duplicates)) throw new Error('Unsupported jscpd JSON report shape');
   const diagnostics = [];
-  const findings = duplicates.flatMap((duplicate, index) => {
+  const findings = [];
+  const findingIds = new Set();
+  for (const [index, duplicate] of duplicates.entries()) {
     const first = duplicate?.firstFile || duplicate?.first || {};
     const second = duplicate?.secondFile || duplicate?.second || {};
     const firstPath = first.name || first.path || duplicate?.firstFile;
@@ -230,7 +244,7 @@ function normalizeJscpd(root, report, provenance) {
     const reference = `jscpd://duplicates/${index}`;
     if (!firstPath || !secondPath) {
       diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_PATH_MISSING', reference, message: 'jscpd duplicate did not provide both file paths; the clone was not retained.' });
-      return [];
+      continue;
     }
     const firstRelative = safeRelativePath(root, firstPath);
     const secondRelative = safeRelativePath(root, secondPath);
@@ -264,36 +278,52 @@ function normalizeJscpd(root, report, provenance) {
       : percentage !== null && percentage >= 10 || severityLines >= 20
         ? 'MEDIUM'
         : 'LOW';
-    const pair = [firstRelative, secondRelative].sort().join('|');
     const nativeFingerprint = ['fingerprint', 'cloneId', 'nativeId', 'id'].map((key) => duplicate?.[key]).find((value) => value !== undefined && value !== null && String(value).trim() !== '');
-    const derivedKey = crypto.createHash('sha256').update(JSON.stringify({ pair, firstRange, secondRange, lines, percentage, tokens, chars, fragment })).digest('hex');
+    const occurrences = [
+      { side: 'first', path: firstRelative, startLine: firstRange.startLine, endLine: firstRange.endLine },
+      { side: 'second', path: secondRelative, startLine: secondRange.startLine, endLine: secondRange.endLine },
+    ];
+    const pairKey = jscpdPairKey(occurrences);
+    const stableCloneKey = nativeFingerprint
+      ? `native:${String(nativeFingerprint)}`
+      : `derived:qak:${jscpdMetricIdentity({ pairKey, fragment, lines, percentage, tokens, chars })}`;
+    const derivedKey = jscpdMetricIdentity({ pairKey, fragment, lines, percentage, tokens, chars });
+    const canonicalOccurrence = [...occurrences].sort((left, right) => jscpdOccurrenceKey(left).localeCompare(jscpdOccurrenceKey(right)))[0];
     const finding = createFinding({
       root,
       engine: 'jscpd',
       ruleId: 'duplicate-code',
-      path: firstPath,
-      line: firstRange.startLine || undefined,
+      path: canonicalOccurrence.path,
+      line: canonicalOccurrence.startLine || undefined,
       severityValue: derivedSeverity,
       message: `Duplicated code with ${secondRelative}${percentage !== null ? ` (${percentage}% similarity)` : ''}`,
-      locus: `${pair}|${duplicate?.fragment || duplicate?.tokens || lines || ''}`,
+      locus: `${stableCloneKey}|pair:${pairKey}`,
       provenance,
       rawReference: reference,
     });
+    if (findingIds.has(finding.id)) {
+      diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_DUPLICATE_DEDUPLICATED', reference, message: 'jscpd repeated an identical clone pair; the duplicate was omitted from canonical findings.' });
+      continue;
+    }
+    findingIds.add(finding.id);
     finding.clone = {
       scope: firstRelative === secondRelative ? 'INTRA_FILE' : 'INTER_FILE',
       grouping: nativeFingerprint
         ? { source: 'NATIVE_FINGERPRINT', key: String(nativeFingerprint), derived: false }
         : { source: 'DERIVED_PAIR_CHARACTERISTICS', key: `qak:${derivedKey}`, derived: true },
       nativeFingerprint: nativeFingerprint ? { value: String(nativeFingerprint), source: 'REPORT', verified: true } : null,
-      occurrences: [
-        { side: 'first', path: firstRelative, startLine: firstRange.startLine, endLine: firstRange.endLine },
-        { side: 'second', path: secondRelative, startLine: secondRange.startLine, endLine: secondRange.endLine },
-      ],
+      identity: {
+        stableClone: stableCloneKey,
+        occurrence: occurrences.map(jscpdOccurrenceKey),
+        pair: pairKey,
+        family: nativeFingerprint ? `native:${String(nativeFingerprint)}` : `derived:qak:${derivedKey}`,
+      },
+      occurrences,
       metrics: { lines, percentage, tokens, chars, fragment },
       dataAvailability: diagnostics.some((item) => item.reference === reference) ? 'PARTIAL' : 'COMPLETE',
     };
-    return [finding];
-  });
+    findings.push(finding);
+  }
   Object.defineProperty(findings, 'diagnostics', { value: diagnostics, enumerable: false });
   return findings;
 }

@@ -58,6 +58,12 @@ function validateFunctionMeasurements(run) {
     if (!Number.isFinite(measurement.value) || measurement.value < 0) throw new Error(`Function measurement ${measurement.measurementId} has an invalid value.`);
     if (!Number.isInteger(measurement.startLine) || measurement.startLine < 1 || !Number.isInteger(measurement.endLine) || measurement.endLine < measurement.startLine) throw new Error(`Function measurement ${measurement.measurementId} has invalid function lines.`);
     if (measurement.status !== 'MEASURED') throw new Error(`Function measurement ${measurement.measurementId} is not MEASURED.`);
+    for (const field of ['subtreeStartLine', 'subtreeEndLine']) {
+      if (measurement[field] !== undefined && measurement[field] !== null && (!Number.isInteger(measurement[field]) || measurement[field] < 1)) throw new Error(`Function measurement ${measurement.measurementId} has an invalid ${field}.`);
+    }
+    if (measurement.subtreeStartLine !== undefined && measurement.subtreeEndLine !== undefined
+      && measurement.subtreeStartLine !== null && measurement.subtreeEndLine !== null
+      && measurement.subtreeEndLine < measurement.subtreeStartLine) throw new Error(`Function measurement ${measurement.measurementId} has an invalid subtree interval.`);
     if (!measurement.provenance || typeof measurement.provenance !== 'object') throw new Error(`Function measurement ${measurement.measurementId} has no provenance.`);
     const source = sourceRevisionOf(measurement.provenance);
     if (source.status === 'VERIFIED' && !source.sha) throw new Error(`Function measurement ${measurement.measurementId} claims VERIFIED without a source SHA.`);
@@ -125,6 +131,57 @@ function buildRecommendations(run, buckets, failures) {
   return recommendations;
 }
 
+const STRUCTURAL_METRICS = ['decisionCount', 'maxDecisionDepth', 'nestedDecisionCount', 'maxSubtreeDecisionCount'];
+
+function buildStructuralComplexity(measurements) {
+  const grouped = new Map();
+  for (const measurement of Array.isArray(measurements) ? measurements : []) {
+    if (!STRUCTURAL_METRICS.includes(measurement.metricId) || measurement.status !== 'MEASURED') continue;
+    const key = `${measurement.path}\0${measurement.functionId}`;
+    if (!grouped.has(key)) grouped.set(key, { path: measurement.path, functionId: measurement.functionId, functionName: measurement.functionName, astRole: measurement.astRole, startLine: measurement.startLine, endLine: measurement.endLine, values: {} });
+    const entry = grouped.get(key);
+    entry.values[measurement.metricId] = measurement.value;
+    if (measurement.metricId === 'maxSubtreeDecisionCount') {
+      entry.maxSubtreeStartLine = measurement.subtreeStartLine ?? null;
+      entry.maxSubtreeEndLine = measurement.subtreeEndLine ?? null;
+      entry.maxSubtreeRootKind = measurement.subtreeRootKind ?? null;
+    }
+  }
+  return [...grouped.values()]
+    .filter((entry) => STRUCTURAL_METRICS.every((metric) => Number.isFinite(entry.values[metric])) && entry.values.decisionCount > 0)
+    .map((entry) => {
+      const { values } = entry;
+      const signals = [];
+      if (values.decisionCount >= 2) signals.push('multiple decisions');
+      if (values.maxDecisionDepth > 1) signals.push('nested decisions');
+      if (values.nestedDecisionCount > 0) signals.push('nested decision count');
+      if (values.maxSubtreeDecisionCount >= 2) signals.push('decision concentration');
+      if (signals.length < 2) return null;
+      const subtree = entry.maxSubtreeStartLine !== null && entry.maxSubtreeEndLine !== null
+        ? `in the subtree at lines ${entry.maxSubtreeStartLine}-${entry.maxSubtreeEndLine}`
+        : 'in the most concentrated subtree';
+      return {
+        path: entry.path,
+        functionId: entry.functionId,
+        functionName: entry.functionName,
+        astRole: entry.astRole,
+        startLine: entry.startLine,
+        endLine: entry.endLine,
+        decisionCount: values.decisionCount,
+        maxDecisionDepth: values.maxDecisionDepth,
+        nestedDecisionCount: values.nestedDecisionCount,
+        maxSubtreeDecisionCount: values.maxSubtreeDecisionCount,
+        maxSubtreeStartLine: entry.maxSubtreeStartLine,
+        maxSubtreeEndLine: entry.maxSubtreeEndLine,
+        maxSubtreeRootKind: entry.maxSubtreeRootKind,
+        signals,
+        explanation: `This function contains ${values.decisionCount} decisions, including ${values.maxSubtreeDecisionCount} ${subtree}, with a maximum depth of ${values.maxDecisionDepth} levels.`,
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.path.localeCompare(right.path) || left.startLine - right.startLine || left.functionId.localeCompare(right.functionId));
+}
+
 function buildStructuredReport(inputRun) {
   validateRun(inputRun);
   const run = sanitizeForExport(inputRun);
@@ -147,6 +204,7 @@ function buildStructuredReport(inputRun) {
     };
   });
   const failures = measurements.filter((measurement) => measurement.validationState !== 'VALIDATED' || measurement.measurementStatus !== 'MEASURED');
+  const structuralComplexity = buildStructuralComplexity(run.functionMeasurements);
   return {
     schemaVersion: '0.1-draft',
     reportVersion: '0.1-draft',
@@ -157,6 +215,7 @@ function buildStructuredReport(inputRun) {
     findings: buckets,
     ...(Array.isArray(run.functionMeasurements) ? { functionMeasurements: run.functionMeasurements } : {}),
     ...(run.maintainabilityCoverage ? { maintainabilityCoverage: run.maintainabilityCoverage } : {}),
+    structuralComplexity,
     clones,
     measurementFailures: failures,
     recommendations: buildRecommendations(run, buckets, failures),
@@ -203,6 +262,15 @@ function renderMarkdown(run) {
       lines.push('');
     } else lines.push('No function measurements recorded.', '');
   }
+  lines.push('## Structural complexity', '');
+  if (!report.structuralComplexity.length) lines.push('No function accumulates multiple structural decision signals.', '');
+  else {
+    lines.push('| File | Function | Lines | Decisions | Max depth | Nested decisions | Max subtree | Subtree lines |', '| --- | --- | --- | ---: | ---: | ---: | ---: | --- |');
+    for (const item of report.structuralComplexity) lines.push(`| ${cell(item.path)} | ${cell(item.functionName)} | ${item.startLine}-${item.endLine} | ${item.decisionCount} | ${item.maxDecisionDepth} | ${item.nestedDecisionCount} | ${item.maxSubtreeDecisionCount} | ${item.maxSubtreeStartLine ?? 'UNKNOWN'}-${item.maxSubtreeEndLine ?? 'UNKNOWN'} |`);
+    lines.push('');
+    for (const item of report.structuralComplexity) lines.push(`- ${cell(item.path)}:${item.startLine}-${item.endLine}: ${cell(item.explanation)}`);
+    lines.push('');
+  }
   if (safeRun.comparison) lines.push('## Historical comparison', '', `- Status: \`${cell(safeRun.comparison.status)}\``, `- Baseline run: \`${cell(safeRun.comparison.baselineRunId || 'UNKNOWN')}\``, `- Resolved: ${report.findings.resolved.length}`, '');
   lines.push('## Findings', '');
   lines.push(...findingTable('New', report.findings.new));
@@ -228,6 +296,8 @@ function renderTerminal(run) {
   const counts = Object.fromEntries(Object.entries(report.findings).map(([key, findings]) => [key, findings.length]));
   lines.push('', 'Findings', '--------', `New: ${counts.new}`, `Historical actionable: ${counts.historicalActionable}`, `Historical justified: ${counts.historicalJustified}`, `Resolved: ${counts.resolved}`, `Reintroduced: ${counts.reintroduced}`, `Unclassified: ${counts.unclassified}`);
   if (report.maintainabilityCoverage) lines.push('', 'Function maintainability', '------------------------', `Coverage: ${report.maintainabilityCoverage.status}`, `Eligible files: ${report.maintainabilityCoverage.eligibleFiles?.length || 0}`, `Measured files: ${report.maintainabilityCoverage.measuredFiles?.length || 0}`, `Excluded files: ${report.maintainabilityCoverage.excludedFiles?.length || 0}`, `Unsupported files: ${report.maintainabilityCoverage.unsupportedFiles?.length || 0}`, `Error files: ${report.maintainabilityCoverage.errorFiles?.length || 0}`, `Functions measured: ${report.maintainabilityCoverage.functionsMeasured || 0}`, `Function measurements: ${report.functionMeasurements?.length || 0}`);
+  lines.push('', 'Structural complexity', '---------------------', `Functions with multiple signals: ${report.structuralComplexity.length}`);
+  for (const item of report.structuralComplexity) lines.push(`${item.path}:${item.startLine}-${item.endLine} | ${item.functionName} | ${item.explanation}`);
   lines.push('', 'Clone audit', '-----------', `Status: ${report.clones.status}`, `Families: ${report.clones.counts.families}`, `Unique occurrences: ${report.clones.counts.occurrences}`, `Unique pairs: ${report.clones.counts.pairs}`);
   const listed = [...report.findings.new, ...report.findings.historicalActionable, ...report.findings.historicalJustified, ...report.findings.reintroduced, ...report.findings.unclassified];
   if (listed.length) { lines.push('', 'ID | Engine | Rule | File | Severity | Lifecycle'); for (const finding of listed) lines.push(`${finding.id} | ${finding.engine} | ${finding.ruleId} | ${finding.path} | ${finding.severity} | ${finding.lifecycle}`); }
