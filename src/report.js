@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
 const { buildCloneAudit, renderCloneMarkdown } = require('./clone-triage');
-const { renderMaintainabilityTrendsMarkdown, renderMaintainabilityTrendsTerminal } = require('./trends');
+const { escapeMarkdownCell, renderMaintainabilityTrendsMarkdown, renderMaintainabilityTrendsTerminal } = require('./trends');
 
 const SHA_PATTERN = /^[a-f0-9]{40}$/i;
 const MEASUREMENT_STATUSES = new Set(['MEASURED', 'PARTIAL', 'NOT_MEASURED', 'FAILURE', 'SKIPPED_BY_POLICY']);
@@ -231,13 +231,11 @@ function buildStructuredReport(inputRun, options = {}) {
   };
 }
 
-function cell(value) { return String(value ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' '); }
-
 function findingTable(title, findings) {
   const lines = [`### ${title}`, ''];
   if (!findings.length) return lines.concat(['None recorded.', '']);
   lines.push('| ID | Engine | Rule | File | Severity | Measurement |', '| --- | --- | --- | --- | --- | --- |');
-  for (const finding of findings) lines.push(`| ${cell(finding.id)} | ${cell(finding.engine)} | ${cell(finding.ruleId)} | ${cell(finding.path)} | ${cell(finding.severity)} | ${cell(finding.measurementStatus)} |`);
+  for (const finding of findings) lines.push(`| ${escapeMarkdownCell(finding.id)} | ${escapeMarkdownCell(finding.engine)} | ${escapeMarkdownCell(finding.ruleId)} | ${escapeMarkdownCell(finding.path)} | ${escapeMarkdownCell(finding.severity)} | ${escapeMarkdownCell(finding.measurementStatus)} |`);
   lines.push('');
   return lines;
 }
@@ -248,23 +246,23 @@ function renderMarkdown(run, options = {}) {
   const discovery = safeRun.discovery || { packageManager: { name: null }, languages: [], workspaces: { packages: [] }, configurations: [] };
   const lines = [
     '# Quality Audit Kit report', '',
-    `- Repository: \`${cell(safeRun.repository.name)}\``, `- Run: \`${safeRun.runId}\``, `- Input scope: \`${safeRun.inputScope}\``, `- Reproducible: \`${safeRun.reproducible}\``,
-    `- Context Git commit: \`${cell(safeRun.repository.contextCommitSha || safeRun.repository.commitSha || 'UNKNOWN')}\``, `- Generated: \`${cell(safeRun.generatedAt || 'UNKNOWN')}\``, '',
+    `- Repository: \`${escapeMarkdownCell(safeRun.repository.name)}\``, `- Run: \`${safeRun.runId}\``, `- Input scope: \`${safeRun.inputScope}\``, `- Reproducible: \`${safeRun.reproducible}\``,
+    `- Context Git commit: \`${escapeMarkdownCell(safeRun.repository.contextCommitSha || safeRun.repository.commitSha || 'UNKNOWN')}\``, `- Generated: \`${escapeMarkdownCell(safeRun.generatedAt || 'UNKNOWN')}\``, '',
     'No global quality score is computed by Quality Audit Kit.', '', '## Measurement status', '',
     '| Run | Scanner | Version | Scope | SHA | Validation | Status | Source revision | Findings | Diagnostic |',
     '| --- | --- | --- | --- | --- | --- | --- | --- | ---: | --- |',
   ];
   for (const measurement of report.measurements) {
     const count = safeRun.findings.filter((finding) => finding.engine === measurement.engine).length;
-    lines.push(`| ${cell(measurement.runId)} | ${cell(measurement.engine)} | ${cell(measurement.version)} | ${cell(measurement.scope)} | ${cell(measurement.sha || 'UNKNOWN')} | ${cell(measurement.validationState)} | ${cell(measurement.measurementStatus)} | ${cell(measurement.sourceRevision.status)} | ${count} | ${cell(measurement.diagnostic || '')} |`);
+    lines.push(`| ${escapeMarkdownCell(measurement.runId)} | ${escapeMarkdownCell(measurement.engine)} | ${escapeMarkdownCell(measurement.version)} | ${escapeMarkdownCell(measurement.scope)} | ${escapeMarkdownCell(measurement.sha || 'UNKNOWN')} | ${escapeMarkdownCell(measurement.validationState)} | ${escapeMarkdownCell(measurement.measurementStatus)} | ${escapeMarkdownCell(measurement.sourceRevision.status)} | ${count} | ${escapeMarkdownCell(measurement.diagnostic || '')} |`);
   }
-  lines.push('', '## Discovery', '', `- Package manager: \`${cell(discovery.packageManager?.name || 'none')}\``, `- Languages: ${discovery.languages?.length ? discovery.languages.map(cell).join(', ') : 'none detected'}`, `- Workspaces: ${discovery.workspaces?.packages?.length || 0} detected`, `- Configurations: ${discovery.configurations?.length || 0}`, '');
+  lines.push('', '## Discovery', '', `- Package manager: \`${escapeMarkdownCell(discovery.packageManager?.name || 'none')}\``, `- Languages: ${discovery.languages?.length ? discovery.languages.map(escapeMarkdownCell).join(', ') : 'none detected'}`, `- Workspaces: ${discovery.workspaces?.packages?.length || 0} detected`, `- Configurations: ${discovery.configurations?.length || 0}`, '');
   if (report.maintainabilityCoverage) {
     const coverage = report.maintainabilityCoverage;
-    lines.push('## Function maintainability', '', `- Coverage: \`${cell(coverage.status)}\``, `- Eligible files: ${coverage.eligibleFiles?.length || 0}`, `- Measured files: ${coverage.measuredFiles?.length || 0}`, `- Excluded files: ${coverage.excludedFiles?.length || 0}`, `- Unsupported files: ${coverage.unsupportedFiles?.length || 0}`, `- Error files: ${coverage.errorFiles?.length || 0}`, `- Functions measured: ${coverage.functionsMeasured || 0}`, '');
+    lines.push('## Function maintainability', '', `- Coverage: \`${escapeMarkdownCell(coverage.status)}\``, `- Eligible files: ${coverage.eligibleFiles?.length || 0}`, `- Measured files: ${coverage.measuredFiles?.length || 0}`, `- Excluded files: ${coverage.excludedFiles?.length || 0}`, `- Unsupported files: ${coverage.unsupportedFiles?.length || 0}`, `- Error files: ${coverage.errorFiles?.length || 0}`, `- Functions measured: ${coverage.functionsMeasured || 0}`, '');
     if (report.functionMeasurements?.length) {
       lines.push('| File | Function | Role | Lines | Metric | Value | Status |', '| --- | --- | --- | --- | --- | ---: | --- |');
-      for (const measurement of report.functionMeasurements) lines.push(`| ${cell(measurement.path)} | ${cell(measurement.functionName)} | ${cell(measurement.astRole)} | ${measurement.startLine}-${measurement.endLine} | ${cell(measurement.metricId)} | ${measurement.value} ${cell(measurement.unit)} | ${cell(measurement.status)} |`);
+      for (const measurement of report.functionMeasurements) lines.push(`| ${escapeMarkdownCell(measurement.path)} | ${escapeMarkdownCell(measurement.functionName)} | ${escapeMarkdownCell(measurement.astRole)} | ${measurement.startLine}-${measurement.endLine} | ${escapeMarkdownCell(measurement.metricId)} | ${measurement.value} ${escapeMarkdownCell(measurement.unit)} | ${escapeMarkdownCell(measurement.status)} |`);
       lines.push('');
     } else lines.push('No function measurements recorded.', '');
   }
@@ -272,16 +270,16 @@ function renderMarkdown(run, options = {}) {
   if (!report.structuralComplexity.length) lines.push('No function accumulates multiple structural decision signals.', '');
   else {
     lines.push('| File | Function | Lines | Decisions | Max depth | Nested decisions | Max subtree | Subtree lines |', '| --- | --- | --- | ---: | ---: | ---: | ---: | --- |');
-    for (const item of report.structuralComplexity) lines.push(`| ${cell(item.path)} | ${cell(item.functionName)} | ${item.startLine}-${item.endLine} | ${item.decisionCount} | ${item.maxDecisionDepth} | ${item.nestedDecisionCount} | ${item.maxSubtreeDecisionCount} | ${item.maxSubtreeStartLine ?? 'UNKNOWN'}-${item.maxSubtreeEndLine ?? 'UNKNOWN'} |`);
+    for (const item of report.structuralComplexity) lines.push(`| ${escapeMarkdownCell(item.path)} | ${escapeMarkdownCell(item.functionName)} | ${item.startLine}-${item.endLine} | ${item.decisionCount} | ${item.maxDecisionDepth} | ${item.nestedDecisionCount} | ${item.maxSubtreeDecisionCount} | ${item.maxSubtreeStartLine ?? 'UNKNOWN'}-${item.maxSubtreeEndLine ?? 'UNKNOWN'} |`);
     lines.push('');
-    for (const item of report.structuralComplexity) lines.push(`- ${cell(item.path)}:${item.startLine}-${item.endLine}: ${cell(item.explanation)}`);
+    for (const item of report.structuralComplexity) lines.push(`- ${escapeMarkdownCell(item.path)}:${item.startLine}-${item.endLine}: ${escapeMarkdownCell(item.explanation)}`);
     lines.push('');
   }
   if (safeRun.comparison) {
-    lines.push('## Historical comparison', '', `- Status: \`${cell(safeRun.comparison.status)}\``, `- Baseline run: \`${cell(safeRun.comparison.baselineRunId || 'UNKNOWN')}\``, `- Resolved: ${report.findings.resolved.length}`, '');
+    lines.push('## Historical comparison', '', `- Status: \`${escapeMarkdownCell(safeRun.comparison.status)}\``, `- Baseline run: \`${escapeMarkdownCell(safeRun.comparison.baselineRunId || 'UNKNOWN')}\``, `- Resolved: ${report.findings.resolved.length}`, '');
     if (safeRun.comparison.diagnostics?.length) {
       lines.push('### Historical comparison diagnostics', '');
-      for (const diagnostic of safeRun.comparison.diagnostics) lines.push(`- **${cell(diagnostic.code || 'COMPARISON_DIAGNOSTIC')}**: ${cell(diagnostic.message)}`);
+      for (const diagnostic of safeRun.comparison.diagnostics) lines.push(`- **${escapeMarkdownCell(diagnostic.code || 'COMPARISON_DIAGNOSTIC')}**: ${escapeMarkdownCell(diagnostic.message)}`);
       lines.push('');
     }
   }
@@ -296,9 +294,9 @@ function renderMarkdown(run, options = {}) {
   lines.push(renderCloneMarkdown(report.clones, { title: '## Clone audit' }).trimEnd(), '');
   lines.push('## Measurement failures', '');
   if (!report.measurementFailures.length) lines.push('None recorded.', '');
-  else for (const failure of report.measurementFailures) lines.push(`- **${cell(failure.engine)}**: ${cell(failure.measurementStatus)} / ${cell(failure.validationState)} — ${cell(failure.diagnostic || 'No diagnostic recorded.')}`);
-  if (report.diagnostics?.length) lines.push('', '## Connector diagnostics', '', ...report.diagnostics.map((diagnostic) => `- **${cell(diagnostic.code || diagnostic.kind)}**: ${cell(diagnostic.message)}`), '');
-  lines.push('', '## Recommendations', '', ...report.recommendations.map((item) => `- ${cell(item)}`), '');
+  else for (const failure of report.measurementFailures) lines.push(`- **${escapeMarkdownCell(failure.engine)}**: ${escapeMarkdownCell(failure.measurementStatus)} / ${escapeMarkdownCell(failure.validationState)} — ${escapeMarkdownCell(failure.diagnostic || 'No diagnostic recorded.')}`);
+  if (report.diagnostics?.length) lines.push('', '## Connector diagnostics', '', ...report.diagnostics.map((diagnostic) => `- **${escapeMarkdownCell(diagnostic.code || diagnostic.kind)}**: ${escapeMarkdownCell(diagnostic.message)}`), '');
+  lines.push('', '## Recommendations', '', ...report.recommendations.map((item) => `- ${escapeMarkdownCell(item)}`), '');
   return `${lines.join('\n')}\n`;
 }
 
@@ -324,6 +322,16 @@ function renderTerminal(run, options = {}) {
   return `${lines.join('\n')}\n`;
 }
 
+function pathEntryExists(filePath) {
+  try {
+    fs.lstatSync(filePath);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false;
+    throw error;
+  }
+}
+
 function writeAtomicExclusive(outputPath, content) {
   if (!outputPath || outputPath === '-') return false;
   const target = path.resolve(outputPath);
@@ -342,15 +350,20 @@ function writeAtomicExclusive(outputPath, content) {
       if (error.code === 'EEXIST') throw new Error(`Refusing concurrent write; artifact lock exists: ${target}`);
       throw error;
     }
-    if (fs.existsSync(target)) throw new Error(`Refusing to overwrite existing artifact: ${target}`);
+    if (pathEntryExists(target)) throw new Error(`Refusing to overwrite existing artifact: ${target}`);
     tempFd = fs.openSync(tempPath, 'wx');
     const buffer = Buffer.isBuffer(content) ? content : Buffer.from(String(content), 'utf8');
     fs.writeSync(tempFd, buffer, 0, buffer.length);
     fs.fsyncSync(tempFd);
     fs.closeSync(tempFd);
     tempFd = undefined;
-    if (fs.existsSync(target)) throw new Error(`Refusing to overwrite existing artifact: ${target}`);
-    fs.renameSync(tempPath, target);
+    try {
+      fs.linkSync(tempPath, target);
+    } catch (error) {
+      if (error.code === 'EEXIST') throw new Error(`Refusing to overwrite existing artifact: ${target}`);
+      throw error;
+    }
+    fs.unlinkSync(tempPath);
     return true;
   } finally {
     if (tempFd !== undefined) { try { fs.closeSync(tempFd); } catch {} }

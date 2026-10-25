@@ -127,43 +127,161 @@ function decisionAction(decision) {
   return decision?.action || decision?.decision || null;
 }
 
+const DECISION_CHRONOLOGY_FIELDS = ['decidedAt', 'recordedAt', 'reviewedAt', 'createdAt', 'updatedAt'];
+const DECISION_OPTIONAL_FIELDS = [
+  'reviewedRevision',
+  'reviewAfter',
+  'evidence',
+  ...DECISION_CHRONOLOGY_FIELDS,
+  'sequence',
+];
+
 function compareDecisions(left, right) {
-  return left.findingId.localeCompare(right.findingId)
-    || left.action.localeCompare(right.action)
-    || left.reason.localeCompare(right.reason)
-    || left.reviewer.localeCompare(right.reviewer);
+  return String(left.findingId).localeCompare(String(right.findingId))
+    || String(left.action).localeCompare(String(right.action))
+    || String(left.reason).localeCompare(String(right.reason))
+    || String(left.reviewer).localeCompare(String(right.reviewer))
+    || JSON.stringify(left).localeCompare(JSON.stringify(right));
 }
 
-function decisionCoverage(decisions, findingIds) {
-  const records = Array.isArray(decisions) ? decisions : decisions?.decisions;
-  const byFinding = new Map();
-  for (const decision of Array.isArray(records) ? records : []) {
-    if (!findingIds.includes(decision?.findingId) || !decisionAction(decision) || !decision.reason || !decision.reviewer) continue;
-    const normalized = {
+function normalizeDecisionInput(input, supplied) {
+  if (!supplied) return { status: 'NOT_SUPPLIED', records: [], diagnostics: [] };
+  const records = Array.isArray(input)
+    ? input
+    : input && typeof input === 'object' && Array.isArray(input.decisions)
+      ? input.decisions
+      : null;
+  if (!records) {
+    return {
+      status: 'INVALID',
+      records: [],
+      diagnostics: [{ code: 'DECISION_BUNDLE_INVALID', message: 'The supplied decision bundle must be an array or an object with a decisions array.' }],
+    };
+  }
+  const diagnostics = [];
+  const normalized = [];
+  for (const [index, decision] of records.entries()) {
+    const action = decisionAction(decision);
+    if (!decision || typeof decision !== 'object' || !decision.findingId || !action || !decision.reason || !decision.reviewer) {
+      diagnostics.push({ code: 'DECISION_RECORD_INVALID', message: `Decision record ${index} is missing findingId, decision/action, reason or reviewer.` });
+      continue;
+    }
+    const normalizedDecision = {
       findingId: String(decision.findingId),
-      action: decisionAction(decision),
+      action: String(action),
       reason: String(decision.reason),
       reviewer: String(decision.reviewer),
     };
+    for (const field of DECISION_OPTIONAL_FIELDS) {
+      if (decision[field] !== undefined) normalizedDecision[field] = decision[field];
+    }
+    normalized.push(normalizedDecision);
+  }
+  return {
+    status: diagnostics.length ? 'INVALID' : 'SUPPLIED',
+    records: normalized,
+    diagnostics,
+  };
+}
+
+function chronologyValue(decision) {
+  for (const field of DECISION_CHRONOLOGY_FIELDS) {
+    if (typeof decision?.[field] !== 'string' || !Number.isFinite(Date.parse(decision[field]))) continue;
+    return { field, value: Date.parse(decision[field]) };
+  }
+  if (Number.isInteger(decision?.sequence)) return { field: 'sequence', value: decision.sequence };
+  return null;
+}
+
+function effectiveDecision(records, findingId) {
+  const actions = [...new Set(records.map((decision) => decision.action))].sort();
+  if (actions.length > 1) {
+    return {
+      findingId,
+      action: null,
+      reason: null,
+      reviewer: null,
+      decisionStatus: 'CONFLICT',
+      actions,
+    };
+  }
+  const chronology = records.map(chronologyValue);
+  const chronologyFields = [...new Set(chronology.filter(Boolean).map((entry) => entry.field))];
+  if (records.length > 1 && chronologyFields.length === 1 && chronology.every(Boolean)) {
+    const latest = Math.max(...chronology.map((entry) => entry.value));
+    const latestRecords = records.filter((_, index) => chronology[index].value === latest);
+    if (latestRecords.length === 1) return { ...latestRecords[0], decisionStatus: 'EFFECTIVE' };
+  }
+  const reason = [...new Set(records.map((decision) => decision.reason))];
+  const reviewer = [...new Set(records.map((decision) => decision.reviewer))];
+  if (records.length === 1 || (reason.length === 1 && reviewer.length === 1)) {
+    return {
+      findingId,
+      action: actions[0],
+      reason: reason[0],
+      reviewer: reviewer[0],
+      ...(records.length > 1 ? { decisionStatus: 'CONSENSUS' } : {}),
+    };
+  }
+  return {
+    findingId,
+    action: actions[0] || null,
+    reason: null,
+    reviewer: null,
+    decisionStatus: 'AMBIGUOUS',
+  };
+}
+
+function decisionCoverage(decisionInput, findingIds) {
+  const input = Array.isArray(decisionInput)
+    ? { status: 'SUPPLIED', records: decisionInput, diagnostics: [] }
+    : decisionInput || { status: 'NOT_SUPPLIED', records: [], diagnostics: [] };
+  const records = input.records;
+  const byFinding = new Map();
+  for (const decision of Array.isArray(records) ? records : []) {
+    if (!findingIds.includes(decision?.findingId) || !decisionAction(decision) || !decision.reason || !decision.reviewer) continue;
+    const normalized = { ...decision, findingId: String(decision.findingId), action: decisionAction(decision) };
     if (!byFinding.has(normalized.findingId)) byFinding.set(normalized.findingId, []);
     byFinding.get(normalized.findingId).push(normalized);
   }
   const covered = findingIds.filter((findingId) => byFinding.has(findingId)).sort();
   const missing = findingIds.filter((findingId) => !byFinding.has(findingId)).sort();
   const decisionHistory = [...byFinding.values()].flat().sort(compareDecisions);
-  const selected = covered.map((findingId) => [...byFinding.get(findingId)].sort(compareDecisions).at(-1)).sort(compareDecisions);
+  const selected = covered.map((findingId) => effectiveDecision(byFinding.get(findingId), findingId)).sort(compareDecisions);
   const actions = [...new Set(decisionHistory.map((decision) => decision.action))].sort();
-  const conflictingFindingIds = covered.filter((findingId) => new Set(byFinding.get(findingId).map((decision) => decision.action)).size > 1);
+  const internallyConflictingFindingIds = covered.filter((findingId) => new Set(byFinding.get(findingId).map((decision) => decision.action)).size > 1);
+  const singleFindingActions = [...new Set(covered
+    .filter((findingId) => new Set(byFinding.get(findingId).map((decision) => decision.action)).size === 1)
+    .map((findingId) => byFinding.get(findingId)[0].action))];
+  const familyConflictingFindingIds = singleFindingActions.length > 1
+    ? covered.filter((findingId) => new Set(byFinding.get(findingId).map((decision) => decision.action)).size === 1)
+    : [];
+  const conflictingFindingIds = [...new Set([...internallyConflictingFindingIds, ...familyConflictingFindingIds])].sort();
+  const ambiguousFindingIds = covered.filter((findingId) => selected.find((decision) => decision.findingId === findingId)?.decisionStatus === 'AMBIGUOUS').sort();
   const status = !selected.length ? 'NONE' : actions.length > 1 ? 'CONFLICT' : missing.length ? 'PARTIAL' : 'COMPLETE';
+  const effectiveActions = [...new Set(selected.map((decision) => decision.action).filter(Boolean))].sort();
+  const familyDecision = input.status === 'SUPPLIED' && status === 'COMPLETE' && effectiveActions.length === 1
+    ? {
+      action: effectiveActions[0],
+      reason: [...new Set(selected.map((decision) => decision.reason).filter(Boolean))].length === 1 ? selected.find((decision) => decision.reason)?.reason : null,
+      reviewer: [...new Set(selected.map((decision) => decision.reviewer).filter(Boolean))].length === 1 ? selected.find((decision) => decision.reviewer)?.reviewer : null,
+    }
+    : null;
   return {
     status,
+    inputStatus: input.status,
+    inputDiagnostics: input.diagnostics,
     findingIds: [...findingIds].sort(),
     coveredFindingIds: covered,
     missingFindingIds: missing,
     actions,
     conflictingFindingIds,
+    internallyConflictingFindingIds,
+    familyConflictingFindingIds,
+    ambiguousFindingIds,
     decisions: selected,
     decisionHistory,
+    familyDecision,
   };
 }
 
@@ -257,7 +375,7 @@ function buildFamily(group, decisions, annotations) {
   const familyId = `clone-family:${hash(JSON.stringify({ grouping: group.grouping, scope: group.scope, provenance: group.provenance })).slice(0, 32)}`;
   const annotation = categoryFromAnnotation(annotations?.[familyId]);
   const decisionState = decisionCoverage(decisions, findingIds);
-  const decision = decisionState.status === 'COMPLETE' ? decisionState.decisions[0] : null;
+  const decision = decisionState.familyDecision;
   const category = annotation?.category || 'REVIEW_REQUIRED';
   const recommendation = recommendationFor(category, decision, decisionState);
   const family = {
@@ -328,16 +446,20 @@ function buildCloneAudit(run, options = {}) {
     group.findings.push(finding);
     groups.set(key, group);
   }
-  const decisions = options.decisions || run?.decisions || [];
+  const hasOptionDecisions = Object.prototype.hasOwnProperty.call(options, 'decisions');
+  const hasRunDecisions = Boolean(run && Object.prototype.hasOwnProperty.call(run, 'decisions'));
+  const rawDecisions = hasOptionDecisions ? options.decisions : hasRunDecisions ? run.decisions : undefined;
+  const decisionInput = normalizeDecisionInput(rawDecisions, hasOptionDecisions || hasRunDecisions);
   const annotations = options.annotations || run?.cloneAnnotations || {};
-  const families = [...groups.values()].map((group) => buildFamily(group, decisions, annotations)).sort((left, right) => left.id.localeCompare(right.id));
+  const families = [...groups.values()].map((group) => buildFamily(group, decisionInput, annotations)).sort((left, right) => left.id.localeCompare(right.id));
   const measurement = cloneMeasurementStatus(jscpdEngine, allFindings, cloneFindings, families);
   if (measurement.diagnostic && !diagnostics.some((diagnostic) => diagnostic.code === measurement.diagnostic.code)) diagnostics.push(measurement.diagnostic);
+  for (const diagnostic of decisionInput.diagnostics) diagnostics.push(diagnostic);
   const prompts = families.filter((family) => family.promptEligible || family.reviewPromptEligible).map((family) => ({
     familyId: family.id,
     fileName: `${family.id.replace(/[^a-z0-9-]+/gi, '-')}.md`,
     prompt: family.reviewPromptEligible
-      ? `Review clone family ${family.id}. Decision coverage is ${family.decisionCoverage.status}; covered findings: ${family.decisionCoverage.coveredFindingIds.join(', ') || 'none'}; findings still requiring an independent decision: ${family.decisionCoverage.missingFindingIds.join(', ') || 'none'}. Existing decisions apply only to their stated findings. Evidence: ${family.qualification.evidence} Files: ${family.files.join(', ')}. Do not modify code or treat the family as justified until a human confirms each finding's scope, ownership, behavior and tests.`
+      ? `Review clone family ${family.id}. Decision coverage is ${family.decisionCoverage.status}; covered findings: ${family.decisionCoverage.coveredFindingIds.join(', ') || 'none'}; findings still requiring an independent decision: ${family.decisionCoverage.missingFindingIds.join(', ') || 'none'}; findings involved in a conflict: ${family.decisionCoverage.conflictingFindingIds.join(', ') || 'none'}; findings with an ambiguous effective record: ${family.decisionCoverage.ambiguousFindingIds.join(', ') || 'none'}. Existing decisions apply only to their stated findings. Evidence: ${family.qualification.evidence} Files: ${family.files.join(', ')}. Do not modify code or treat the family as justified until a human confirms each finding's scope, ownership, behavior and tests.`
       : `Review clone family ${family.id}. Evidence: ${family.qualification.evidence} Files: ${family.files.join(', ')}. Proposed action: ${family.recommendation}. Do not modify code until a human confirms ownership, behavior and tests.`,
   }));
   return {
@@ -357,7 +479,7 @@ function buildCloneAudit(run, options = {}) {
       cloneEvidence: measurement.evidence,
       comparison: run?.comparison ? { status: run.comparison.status || 'UNKNOWN', baselineRunId: run.comparison.baselineRunId || null } : { status: 'NOT_RECORDED', baselineRunId: null },
       history: run?.history ? 'RECORDED' : 'NOT_RECORDED',
-      decisions: decisions.length ? 'SUPPLIED' : 'NOT_SUPPLIED',
+      decisions: decisionInput.status,
     },
     counts: { families: families.length, occurrences: families.reduce((sum, family) => sum + family.uniqueOccurrenceCount, 0), pairs: families.reduce((sum, family) => sum + family.pairCount, 0), actionable: families.filter((family) => family.promptEligible).length, reviewPrompts: families.filter((family) => family.reviewPromptEligible).length, prompts: prompts.length, incomplete: families.filter((family) => family.dataAvailability !== 'COMPLETE').length },
     diagnostics,
@@ -387,7 +509,7 @@ function renderCloneMarkdown(audit, options = {}) {
     else for (const family of groups[letter]) lines.push(familyLine(family));
     lines.push('');
   }
-  lines.push('## E. Synthèse complète', '', ...families.map((family) => `- **${family.id}**: ${family.qualification.category}; ${family.scope}; ${family.uniqueOccurrenceCount} occurrences; coverage=${family.lineCoverage.unionLines ?? 'NOT_ESTIMABLE'}; priority=${family.priority}; prudence=${family.prudence}; effort=${family.effort}; decision coverage=${family.decisionCoverage.status}; covered=${family.decisionCoverage.coveredFindingIds.join(', ') || 'none'}; pending=${family.decisionCoverage.missingFindingIds.join(', ') || 'none'}.`));
+  lines.push('## E. Synthèse complète', '', ...families.map((family) => `- **${family.id}**: ${family.qualification.category}; ${family.scope}; ${family.uniqueOccurrenceCount} occurrences; coverage=${family.lineCoverage.unionLines ?? 'NOT_ESTIMABLE'}; priority=${family.priority}; prudence=${family.prudence}; effort=${family.effort}; decision coverage=${family.decisionCoverage.status}; covered=${family.decisionCoverage.coveredFindingIds.join(', ') || 'none'}; pending=${family.decisionCoverage.missingFindingIds.join(', ') || 'none'}; conflicts=${family.decisionCoverage.conflictingFindingIds.join(', ') || 'none'}; ambiguous=${family.decisionCoverage.ambiguousFindingIds.join(', ') || 'none'}.`));
   if (!families.length) lines.push('None recorded.');
   if (audit?.diagnostics?.length) lines.push('', '### Diagnostics', '', ...audit.diagnostics.map((diagnostic) => `- **${diagnostic.code}**: ${diagnostic.message}`));
   lines.push('', 'No automatic agent or source-code change is produced by this audit.', '');

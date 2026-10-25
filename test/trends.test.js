@@ -5,7 +5,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
-const { compareMaintainabilityRuns, renderMaintainabilityTrendsMarkdown } = require('../src/trends');
+const { compareMaintainabilityRuns, renderMaintainabilityTrendsMarkdown, renderMaintainabilityTrendsTerminal } = require('../src/trends');
 const { buildStructuredReport, renderMarkdown } = require('../src/report');
 
 const METRICS = [
@@ -215,6 +215,85 @@ test('requires complete coverage, scope, engine versions and metric definitions 
   assert.match(contradictoryEngineResult.contract.reasons.join(' '), /engine version/i);
 });
 
+test('does not count a fully non-comparable function as comparable', () => {
+  const previous = makeRun({ runKey: 'metric-previous', source: 'a' });
+  const current = makeRun({ runKey: 'metric-current', source: 'b', metricVersion: '2' });
+  const result = compareMaintainabilityRuns(previous, current);
+  const entry = result.functions[0];
+
+  assert.equal(entry.status, 'NOT_COMPARABLE');
+  assert.equal(entry.metrics.every((metric) => metric.status === 'NOT_COMPARABLE'), true);
+  assert.equal(result.summary.matchedFunctions, 1);
+  assert.equal(result.summary.comparableFunctions, 0);
+  assert.equal(result.summary.notComparable, 1);
+  assert.equal(result.summary.improved, 0);
+  assert.equal(result.nonComparableFunctions.some((candidate) => candidate.reason === 'FUNCTION_METRIC_NOT_COMPARABLE'), true);
+});
+
+test('keeps valid metric deltas but conservatively classifies mixed metric evidence', () => {
+  const previous = makeRun({ runKey: 'mixed-previous', source: 'a' });
+  const current = makeRun({ runKey: 'mixed-current', source: 'b', values: {
+    'v1:function-1': { cognitiveComplexity: 5, cyclomaticComplexity: 3, functionLength: 25, decisionCount: 2, maxDecisionDepth: 1, nestedDecisionCount: 0, maxSubtreeDecisionCount: 1 },
+  } });
+  current.functionMeasurements = current.functionMeasurements.filter((measurement) => !['decisionCount', 'maxDecisionDepth', 'nestedDecisionCount'].includes(measurement.metricId));
+  current.functionMeasurements.find((measurement) => measurement.metricId === 'functionLength').metricVersion = '2';
+
+  const result = compareMaintainabilityRuns(previous, current);
+  const entry = result.functions[0];
+  const cognitive = entry.metrics.find((metric) => metric.metricId === 'cognitiveComplexity');
+  const functionLength = entry.metrics.find((metric) => metric.metricId === 'functionLength');
+  const markdown = renderMaintainabilityTrendsMarkdown(result);
+  const terminal = renderMaintainabilityTrendsTerminal(result);
+
+  assert.equal(entry.status, 'NOT_COMPARABLE');
+  assert.equal(cognitive.status, 'IMPROVED');
+  assert.equal(cognitive.absoluteDelta, -5);
+  assert.equal(functionLength.status, 'NOT_COMPARABLE');
+  assert.equal(entry.metrics.filter((metric) => metric.status === 'NOT_MEASURED').length, 3);
+  assert.equal(result.summary.matchedFunctions, 1);
+  assert.equal(result.summary.comparableFunctions, 0);
+  assert.equal(result.summary.notComparable, 1);
+  assert.equal(result.summary.partiallyNotMeasured, 0);
+  assert.equal(result.summary.notMeasured, 0);
+  assert.match(markdown, /Matched functions: 1/);
+  assert.match(markdown, /Comparable functions: 0/);
+  assert.match(markdown, /Not comparable: 1/);
+  assert.match(markdown, /FUNCTION_METRIC_NOT_COMPARABLE/);
+  assert.match(terminal, /Comparable functions: 0/);
+  assert.match(terminal, /Not comparable: 1/);
+  assert.match(terminal, /cognitiveComplexity=10->5:IMPROVED/);
+});
+
+test('distinguishes partially and fully not-measured matched functions', () => {
+  const previous = makeRun({ runKey: 'missing-previous', source: 'a', functions: [
+    { functionId: 'v1:partial', functionName: 'partial', pathName: 'src/partial.js' },
+    { functionId: 'v1:full', functionName: 'full', pathName: 'src/full.js' },
+  ], values: {
+    'v1:partial': { cognitiveComplexity: 10, functionLength: 20 },
+    'v1:full': { cognitiveComplexity: 10 },
+  } });
+  const current = makeRun({ runKey: 'missing-current', source: 'b', functions: [
+    { functionId: 'v1:partial', functionName: 'partial', pathName: 'src/partial.js' },
+    { functionId: 'v1:full', functionName: 'full', pathName: 'src/full.js' },
+  ], values: {
+    'v1:partial': { cognitiveComplexity: 5 },
+    'v1:full': { cyclomaticComplexity: 3 },
+  } });
+
+  const result = compareMaintainabilityRuns(previous, current);
+  const partial = result.functions.find((entry) => entry.current.functionId === 'v1:partial');
+  const full = result.functions.find((entry) => entry.current.functionId === 'v1:full');
+
+  assert.equal(partial.status, 'NOT_MEASURED');
+  assert.equal(partial.metrics.some((metric) => metric.status === 'IMPROVED'), true);
+  assert.equal(full.status, 'NOT_MEASURED');
+  assert.equal(full.metrics.every((metric) => metric.status === 'NOT_MEASURED'), true);
+  assert.equal(result.summary.matchedFunctions, 2);
+  assert.equal(result.summary.comparableFunctions, 0);
+  assert.equal(result.summary.partiallyNotMeasured, 1);
+  assert.equal(result.summary.notMeasured, 1);
+});
+
 test('keeps a complete measured zero-function inventory comparable', () => {
   const previous = makeRun({ runKey: 'zero-previous', source: 'a', functions: [], eligibleFiles: ['src/constants.js'] });
   const current = makeRun({ runKey: 'zero-current', source: 'b', functions: [], eligibleFiles: ['src/constants.js'] });
@@ -237,6 +316,42 @@ test('trends output is deterministic and integrates into offline reports', () =>
   const structured = buildStructuredReport(reportRun, { maintainabilityTrends: first });
   assert.equal(structured.maintainabilityTrends.currentRunId, current.runId);
   assert.match(renderMarkdown(reportRun, { maintainabilityTrends: first }), /Maintainability trends/);
+});
+
+test('keeps imported paths and names inside Markdown data cells', () => {
+  const functions = [
+    { functionId: 'v1:unsafe', functionName: 'transform *[data]*', pathName: 'src/a|b.js' },
+    { functionId: 'v1:newline', functionName: 'lineBreak', pathName: 'src/line\nbreak.js' },
+    { functionId: 'v1:ordinary', functionName: 'ordinary', pathName: 'src/ordinary.js' },
+  ];
+  const previous = makeRun({ runKey: 'markdown-previous', source: 'a', functions });
+  const current = makeRun({ runKey: 'markdown-current', source: 'b', functions });
+  const result = compareMaintainabilityRuns(previous, current);
+  const before = JSON.stringify(current);
+  const markdown = renderMaintainabilityTrendsMarkdown(result);
+  const unsafeRow = markdown.split('\n').find((line) => line.startsWith('| src/a\\|b.js::'));
+
+  assert.ok(unsafeRow);
+  assert.equal((unsafeRow.match(/(?<!\\)\|/g) || []).length, 6);
+  assert.match(unsafeRow, /transform \*\[data\]\*/);
+  const newlineRow = markdown.split('\n').find((line) => line.startsWith('| src/line break.js::'));
+  assert.ok(newlineRow);
+  assert.equal((newlineRow.match(/(?<!\\)\|/g) || []).length, 6);
+  assert.match(markdown, /src\/ordinary\.js::ordinary/);
+  assert.doesNotMatch(markdown, /^break\.js::lineBreak/m);
+  assert.equal(JSON.stringify(current), before);
+
+  const integrated = renderMarkdown(current, { maintainabilityTrends: result });
+  const integratedTrendRow = integrated.split('\n').find((line) => line.startsWith('| src/a\\|b.js::'));
+  assert.ok(integratedTrendRow);
+  assert.equal((integratedTrendRow.match(/(?<!\\)\|/g) || []).length, 6);
+  assert.match(integratedTrendRow, /transform \*\[data\]\*/);
+  const integratedNewlineRow = integrated.split('\n').find((line) => line.startsWith('| src/line break.js::'));
+  assert.ok(integratedNewlineRow);
+  assert.equal((integratedNewlineRow.match(/(?<!\\)\|/g) || []).length, 6);
+  assert.match(integrated, /src\/ordinary\.js::ordinary/);
+  assert.doesNotMatch(integrated, /^break\.js::lineBreak/m);
+  assert.equal(JSON.stringify(current), before);
 });
 
 test('trends CLI reads two runs, never scans, and supports JSON and Markdown output', () => {

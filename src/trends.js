@@ -275,10 +275,11 @@ function metricResult(metricId, previous, current) {
 
 function functionStatus(metrics) {
   const statuses = metrics.map((metric) => metric.status);
+  if (statuses.includes('NOT_COMPARABLE')) return 'NOT_COMPARABLE';
+  if (statuses.includes('NOT_MEASURED')) return 'NOT_MEASURED';
   if (statuses.includes('DEGRADED')) return 'DEGRADED';
   if (statuses.includes('IMPROVED')) return 'IMPROVED';
   if (statuses.length && statuses.every((status) => status === 'UNCHANGED')) return 'UNCHANGED';
-  if (statuses.includes('NOT_COMPARABLE')) return 'NOT_COMPARABLE';
   return 'NOT_MEASURED';
 }
 
@@ -316,14 +317,38 @@ function matchFunctions(previousIndex, currentIndex) {
   return { matches, added, removed, notComparable };
 }
 
+function nonComparableKey(entry) {
+  if (entry?.functionId) return `function:${entry.functionId}`;
+  if (entry?.measurement?.measurementId) return `measurement:${entry.measurement.measurementId}`;
+  return `entry:${entry?.reason || ''}:${signatureKey(entry)}`;
+}
+
 function summarize(functions, added, removed, notComparable) {
-  const counts = { comparableFunctions: functions.length, improved: 0, degraded: 0, unchanged: 0, notComparable: notComparable.length, notMeasured: 0, added: added.length, removed: removed.length };
+  const structuralNotComparable = new Set(notComparable.map(nonComparableKey));
+  const counts = {
+    matchedFunctions: functions.length,
+    comparableFunctions: 0,
+    improved: 0,
+    degraded: 0,
+    unchanged: 0,
+    notComparable: structuralNotComparable.size,
+    partiallyNotMeasured: 0,
+    notMeasured: 0,
+    added: added.length,
+    removed: removed.length,
+  };
   for (const entry of functions) {
     if (entry.status === 'IMPROVED') counts.improved += 1;
     else if (entry.status === 'DEGRADED') counts.degraded += 1;
     else if (entry.status === 'UNCHANGED') counts.unchanged += 1;
-    else if (entry.status === 'NOT_MEASURED') counts.notMeasured += 1;
+    else if (entry.status === 'NOT_COMPARABLE') counts.notComparable += 1;
+    else if (entry.status === 'NOT_MEASURED') {
+      const measured = entry.metrics.some((metric) => ['IMPROVED', 'DEGRADED', 'UNCHANGED'].includes(metric.status));
+      if (measured) counts.partiallyNotMeasured += 1;
+      else counts.notMeasured += 1;
+    }
   }
+  counts.comparableFunctions = counts.improved + counts.degraded + counts.unchanged;
   return counts;
 }
 
@@ -355,6 +380,18 @@ function compareMaintainabilityRuns(previousRun, currentRun) {
     }
   }
   functionComparisons.sort((left, right) => signatureKey(left.current).localeCompare(signatureKey(right.current)) || left.current.functionId.localeCompare(right.current.functionId));
+  const nonComparableFunctions = [
+    ...matched.notComparable,
+    ...functionComparisons
+      .filter((entry) => entry.status === 'NOT_COMPARABLE')
+      .map((entry) => ({
+        status: 'NOT_COMPARABLE',
+        reason: 'FUNCTION_METRIC_NOT_COMPARABLE',
+        ...entry.current,
+        metricIds: entry.metrics.filter((metric) => metric.status === 'NOT_COMPARABLE').map((metric) => metric.metricId).sort(),
+        reasons: sortedUnique(entry.metrics.flatMap((metric) => metric.status === 'NOT_COMPARABLE' ? metric.reasons : [])),
+      })),
+  ];
   const status = contractReasons.length ? 'NOT_COMPARABLE' : 'COMPARABLE';
   const output = {
     schemaVersion: TREND_SCHEMA_VERSION,
@@ -371,12 +408,16 @@ function compareMaintainabilityRuns(previousRun, currentRun) {
       checks: { previous: previous.checks, current: current.checks, runIdsDistinct: previous.runId !== current.runId, repositoryIdentity: previous.repository === current.repository, inputScopeCompatible: previous.inputScope === current.inputScope, engineVersionCompatible: previous.engineVersion === current.engineVersion },
     },
     functions: functionComparisons,
-    nonComparableFunctions: matched.notComparable.sort((left, right) => `${left.path || ''}:${left.functionId || ''}:${left.reason}`.localeCompare(`${right.path || ''}:${right.functionId || ''}:${right.reason}`)),
+    nonComparableFunctions: nonComparableFunctions.sort((left, right) => `${left.path || ''}:${left.functionId || ''}:${left.reason}`.localeCompare(`${right.path || ''}:${right.functionId || ''}:${right.reason}`)),
     addedFunctions: contractReasons.length ? [] : matched.added.sort((left, right) => signatureKey(left).localeCompare(signatureKey(right))),
     removedFunctions: contractReasons.length ? [] : matched.removed.sort((left, right) => signatureKey(left).localeCompare(signatureKey(right))),
     summary: summarize(functionComparisons, contractReasons.length ? [] : matched.added, contractReasons.length ? [] : matched.removed, matched.notComparable),
   };
   return output;
+}
+
+function escapeMarkdownCell(value) {
+  return String(value ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
 function formatMetricValue(value) {
@@ -386,27 +427,30 @@ function formatMetricValue(value) {
 function renderMaintainabilityTrendsMarkdown(trends, options = {}) {
   const title = options.title || '# Maintainability trends';
   const lines = [title, '', `- Status: \`${trends?.status || 'NOT_COMPARABLE'}\``, `- Previous run: \`${trends?.previousRunId || 'UNKNOWN'}\``, `- Current run: \`${trends?.currentRunId || 'UNKNOWN'}\``, `- Previous source revision: \`${trends?.sourceRevisions?.previous?.sha || 'UNKNOWN'}\` (${trends?.sourceRevisions?.previous?.status || 'UNKNOWN'})`, `- Current source revision: \`${trends?.sourceRevisions?.current?.sha || 'UNKNOWN'}\` (${trends?.sourceRevisions?.current?.status || 'UNKNOWN'})`, ''];
-  if (trends?.contract?.reasons?.length) lines.push('## Comparability contract', '', ...trends.contract.reasons.map((reason) => `- ${reason}`), '');
+  if (trends?.contract?.reasons?.length) lines.push('## Comparability contract', '', ...trends.contract.reasons.map((reason) => `- ${escapeMarkdownCell(reason)}`), '');
   const summary = trends?.summary || {};
-  lines.push('## Summary', '', `- Comparable functions: ${summary.comparableFunctions || 0}`, `- Improved: ${summary.improved || 0}`, `- Degraded: ${summary.degraded || 0}`, `- Unchanged: ${summary.unchanged || 0}`, `- Not comparable: ${summary.notComparable || 0}`, `- Not measured: ${summary.notMeasured || 0}`, `- Added: ${summary.added || 0}`, `- Removed: ${summary.removed || 0}`, '');
-  lines.push('## Comparable functions', '');
+  lines.push('## Summary', '', `- Matched functions: ${summary.matchedFunctions || 0}`, `- Comparable functions: ${summary.comparableFunctions || 0}`, `- Improved: ${summary.improved || 0}`, `- Degraded: ${summary.degraded || 0}`, `- Unchanged: ${summary.unchanged || 0}`, `- Not comparable: ${summary.notComparable || 0}`, `- Partially not measured: ${summary.partiallyNotMeasured || 0}`, `- Not measured: ${summary.notMeasured || 0}`, `- Added: ${summary.added || 0}`, `- Removed: ${summary.removed || 0}`, '');
+  lines.push('## Matched functions', '');
   if (!trends?.functions?.length) lines.push('None recorded.', '');
   else {
     lines.push('| Function | Previous | Current | Status | Metric changes |', '| --- | --- | --- | --- | --- |');
     for (const entry of trends.functions) {
-      const metrics = entry.metrics.map((metric) => `${metric.metricId}: ${formatMetricValue(metric.previousValue)} -> ${formatMetricValue(metric.currentValue)} (${metric.status})`).join('; ');
-      lines.push(`| ${entry.current.path}::${entry.current.functionName} | ${entry.previous.startLine}-${entry.previous.endLine} | ${entry.current.startLine}-${entry.current.endLine} | ${entry.status} | ${metrics} |`);
+      const functionLabel = escapeMarkdownCell(`${entry.current.path}::${entry.current.functionName}`);
+      const previousLines = escapeMarkdownCell(`${entry.previous.startLine}-${entry.previous.endLine}`);
+      const currentLines = escapeMarkdownCell(`${entry.current.startLine}-${entry.current.endLine}`);
+      const metrics = escapeMarkdownCell(entry.metrics.map((metric) => `${metric.metricId}: ${formatMetricValue(metric.previousValue)} -> ${formatMetricValue(metric.currentValue)} (${metric.status})`).join('; '));
+      lines.push(`| ${functionLabel} | ${previousLines} | ${currentLines} | ${escapeMarkdownCell(entry.status)} | ${metrics} |`);
     }
     lines.push('');
   }
-  lines.push('## Added functions', '', ...(trends?.addedFunctions?.length ? trends.addedFunctions.map((entry) => `- ${entry.path}::${entry.functionName} (${entry.functionId})`) : ['None recorded.']), '', '## Removed functions', '', ...(trends?.removedFunctions?.length ? trends.removedFunctions.map((entry) => `- ${entry.path}::${entry.functionName} (${entry.functionId})`) : ['None recorded.']), '');
-  lines.push('## Non-comparable functions', '', ...(trends?.nonComparableFunctions?.length ? trends.nonComparableFunctions.map((entry) => `- ${entry.path || 'UNKNOWN'}::${entry.functionName || 'UNKNOWN'} — ${entry.reason}`) : ['None recorded.']), '', 'No normative gate, baseline, finding lifecycle or human decision is changed by this trend report.', '');
+  lines.push('## Added functions', '', ...(trends?.addedFunctions?.length ? trends.addedFunctions.map((entry) => `- ${escapeMarkdownCell(`${entry.path}::${entry.functionName} (${entry.functionId})`)}`) : ['None recorded.']), '', '## Removed functions', '', ...(trends?.removedFunctions?.length ? trends.removedFunctions.map((entry) => `- ${escapeMarkdownCell(`${entry.path}::${entry.functionName} (${entry.functionId})`)}`) : ['None recorded.']), '');
+  lines.push('## Non-comparable functions', '', ...(trends?.nonComparableFunctions?.length ? trends.nonComparableFunctions.map((entry) => `- ${escapeMarkdownCell(`${entry.path || 'UNKNOWN'}::${entry.functionName || 'UNKNOWN'} — ${entry.reason}`)}`) : ['None recorded.']), '', 'No normative gate, baseline, finding lifecycle or human decision is changed by this trend report.', '');
   return `${lines.join('\n')}\n`;
 }
 
 function renderMaintainabilityTrendsTerminal(trends) {
   const summary = trends?.summary || {};
-  const lines = ['Maintainability trends', '----------------------', `Status: ${trends?.status || 'NOT_COMPARABLE'}`, `Previous run: ${trends?.previousRunId || 'UNKNOWN'}`, `Current run: ${trends?.currentRunId || 'UNKNOWN'}`, `Improved: ${summary.improved || 0}`, `Degraded: ${summary.degraded || 0}`, `Unchanged: ${summary.unchanged || 0}`, `Not comparable: ${summary.notComparable || 0}`, `Added: ${summary.added || 0}`, `Removed: ${summary.removed || 0}`];
+  const lines = ['Maintainability trends', '----------------------', `Status: ${trends?.status || 'NOT_COMPARABLE'}`, `Previous run: ${trends?.previousRunId || 'UNKNOWN'}`, `Current run: ${trends?.currentRunId || 'UNKNOWN'}`, `Matched functions: ${summary.matchedFunctions || 0}`, `Comparable functions: ${summary.comparableFunctions || 0}`, `Improved: ${summary.improved || 0}`, `Degraded: ${summary.degraded || 0}`, `Unchanged: ${summary.unchanged || 0}`, `Not comparable: ${summary.notComparable || 0}`, `Partially not measured: ${summary.partiallyNotMeasured || 0}`, `Not measured: ${summary.notMeasured || 0}`, `Added: ${summary.added || 0}`, `Removed: ${summary.removed || 0}`];
   if (trends?.contract?.reasons?.length) lines.push('', 'Comparability reasons', ...trends.contract.reasons.map((reason) => `- ${reason}`));
   for (const entry of trends?.functions || []) lines.push(`${entry.current.path}::${entry.current.functionName} | ${entry.status} | ${entry.metrics.map((metric) => `${metric.metricId}=${formatMetricValue(metric.previousValue)}->${formatMetricValue(metric.currentValue)}:${metric.status}`).join(', ')}`);
   return `${lines.join('\n')}\n`;
@@ -422,6 +466,7 @@ module.exports = {
   TREND_SCHEMA_VERSION,
   TREND_STATUSES,
   compareMaintainabilityRuns,
+  escapeMarkdownCell,
   importTrendRun,
   renderMaintainabilityTrendsMarkdown,
   renderMaintainabilityTrendsTerminal,

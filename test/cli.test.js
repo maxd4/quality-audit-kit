@@ -3,14 +3,14 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const test = require('node:test');
 const { createDeterministicAdapter } = require('../src/agents');
 const { classifyExecution, compareSnapshots, executeFix, runValidations, validateLot, verifyFixResult } = require('../src/fix');
 const { buildPlan, nextLot } = require('../src/planner');
 const { buildSarif, importSarifFile } = require('../src/sarif');
 const { connectSonar, importSonar, normalizeUrl, readToken } = require('../src/sonar');
-const { buildStructuredReport, createBundle, createZip, readZipEntries, validateRun, verifyBundle } = require('../src/report');
+const { buildStructuredReport, createBundle, createZip, readZipEntries, validateRun, verifyBundle, writeAtomicExclusive } = require('../src/report');
 
 const ROOT = path.resolve(__dirname, '..');
 const CLI = path.join(ROOT, 'bin', 'quality-audit-kit.js');
@@ -45,6 +45,20 @@ function runCli(repository, args) {
 
 function cleanup(repository) {
   fs.rmSync(repository, { recursive: true, force: true });
+}
+
+function runWriterProcess(target, content) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['-e', [
+      "const { writeAtomicExclusive } = require(process.argv[1]);",
+      "try { writeAtomicExclusive(process.argv[2], process.argv[3]); process.exit(0); }",
+      "catch (error) { process.stderr.write(error.message); process.exit(1); }",
+    ].join(' '), path.join(ROOT, 'src', 'report.js'), target, content], { cwd: ROOT, windowsHide: true });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('close', (code, signal) => resolve({ code, signal, stderr }));
+  });
 }
 
 function initializeGit(repository) {
@@ -872,6 +886,54 @@ test('report produces deterministic views, an offline bundle and refuses overwri
     const invalidBundle = runCli(repository, ['report', '--verify-bundle', 'bundle-corrupt.zip']);
     assert.notEqual(invalidBundle.status, 0);
     assert.match(invalidBundle.stderr, /ZIP|checksum|Bundle/);
+  } finally {
+    cleanup(repository);
+  }
+});
+
+test('writer refuses regular files and valid or dangling symlinks, while keeping exclusive atomic writes', async () => {
+  const repository = makeEmptyRepository();
+  try {
+    const regular = path.join(repository, 'regular.json');
+    fs.writeFileSync(regular, 'existing-regular\n');
+    const regularBefore = fs.lstatSync(regular);
+    assert.throws(() => writeAtomicExclusive(regular, 'replacement\n'), /Refusing to overwrite existing artifact/);
+    assert.equal(fs.lstatSync(regular).isFile(), true);
+    assert.equal(fs.lstatSync(regular).mode, regularBefore.mode);
+    assert.equal(fs.readFileSync(regular, 'utf8'), 'existing-regular\n');
+
+    const validTarget = path.join(repository, 'valid-target.txt');
+    const validLink = path.join(repository, 'valid-link.txt');
+    fs.writeFileSync(validTarget, 'valid-target\n');
+    fs.symlinkSync(validTarget, validLink, 'file');
+    assert.equal(fs.lstatSync(validLink).isSymbolicLink(), true);
+    assert.throws(() => writeAtomicExclusive(validLink, 'replacement\n'), /Refusing to overwrite existing artifact/);
+    assert.equal(fs.lstatSync(validLink).isSymbolicLink(), true);
+    assert.equal(fs.readFileSync(validLink, 'utf8'), 'valid-target\n');
+
+    const danglingTarget = path.join(repository, 'missing-target.txt');
+    const danglingLink = path.join(repository, 'dangling-link.txt');
+    fs.symlinkSync(danglingTarget, danglingLink, 'file');
+    assert.equal(fs.existsSync(danglingLink), false);
+    assert.equal(fs.lstatSync(danglingLink).isSymbolicLink(), true);
+    assert.throws(() => writeAtomicExclusive(danglingLink, 'replacement\n'), /Refusing to overwrite existing artifact/);
+    assert.equal(fs.lstatSync(danglingLink).isSymbolicLink(), true);
+    assert.equal(fs.existsSync(danglingTarget), false);
+
+    const safe = path.join(repository, 'safe.json');
+    assert.equal(writeAtomicExclusive(safe, 'safe-content\n'), true);
+    assert.equal(fs.lstatSync(safe).isFile(), true);
+    assert.equal(fs.readFileSync(safe, 'utf8'), 'safe-content\n');
+
+    const concurrent = path.join(repository, 'concurrent.json');
+    const results = await Promise.all([
+      runWriterProcess(concurrent, 'writer-one\n'),
+      runWriterProcess(concurrent, 'writer-two\n'),
+    ]);
+    assert.deepEqual(results.map((result) => result.code).sort((left, right) => left - right), [0, 1]);
+    assert.equal(['writer-one\n', 'writer-two\n'].includes(fs.readFileSync(concurrent, 'utf8')), true);
+    assert.equal(fs.existsSync(`${concurrent}.qak-lock`), false);
+    assert.equal(fs.readdirSync(repository).some((name) => name.startsWith('concurrent.json.qak-tmp-')), false);
   } finally {
     cleanup(repository);
   }

@@ -368,11 +368,84 @@ test('contradictory family decisions are explicit and independent of input order
   const right = second.families[0];
   assert.deepEqual(left.decisionCoverage, right.decisionCoverage);
   assert.equal(left.decisionCoverage.status, 'CONFLICT');
+  assert.deepEqual(left.decisionCoverage.conflictingFindingIds, ['f1', 'f2']);
+  assert.deepEqual(left.decisionCoverage.familyConflictingFindingIds, ['f1', 'f2']);
+  assert.deepEqual(left.decisionCoverage.internallyConflictingFindingIds, []);
   assert.equal(left.recommendation, 'REVIEW_FIRST');
   assert.equal(left.priority, 'REVIEW_REQUIRED');
   assert.equal(left.qualification.approvedDecision, null);
   assert.deepEqual(left.qualification.decisions.map((decision) => decision.reviewer), ['alice', 'bob']);
   assert.equal(left.reviewPromptEligible, true);
+  assert.match(first.prompts[0].prompt, /findings involved in a conflict: f1, f2/);
+  assert.match(renderCloneMarkdown(first), /conflicts=f1, f2/);
+});
+
+test('repeated same-action decisions expose ambiguity instead of selecting by reason or reviewer', () => {
+  const decisions = [
+    humanDecision('f1', 'KEEP_JUSTIFIED', 'Z - older explanation', 'alice'),
+    humanDecision('f1', 'KEEP_JUSTIFIED', 'A - revised explanation', 'bob'),
+  ];
+  const first = buildCloneAudit(runWithFindings([fixtureFinding('f1', 'src/a.js', 1, 5, 'src/b.js', 10, 14)]), { decisions });
+  const second = buildCloneAudit(runWithFindings([fixtureFinding('f1', 'src/a.js', 1, 5, 'src/b.js', 10, 14)]), { decisions: [...decisions].reverse() });
+  const family = first.families[0];
+  assert.deepEqual(first, second);
+  assert.equal(family.decisionCoverage.status, 'COMPLETE');
+  assert.deepEqual(family.decisionCoverage.ambiguousFindingIds, ['f1']);
+  assert.equal(family.decisionCoverage.decisions[0].decisionStatus, 'AMBIGUOUS');
+  assert.equal(family.qualification.approvedDecision.action, 'KEEP_JUSTIFIED');
+  assert.equal(family.qualification.approvedDecision.reason, null);
+  assert.equal(family.qualification.approvedDecision.reviewer, null);
+  assert.match(JSON.stringify(family), /AMBIGUOUS/);
+});
+
+test('contradictory records on one finding remain an internal conflict', () => {
+  const audit = buildCloneAudit(runWithFindings([fixtureFinding('f1', 'src/a.js', 1, 5, 'src/b.js', 10, 14)]), {
+    decisions: [
+      humanDecision('f1', 'KEEP_JUSTIFIED', 'Required compatibility pair', 'alice'),
+      humanDecision('f1', 'FALSE_POSITIVE', 'Generated-only pair', 'bob'),
+    ],
+  });
+  const coverage = audit.families[0].decisionCoverage;
+  assert.equal(coverage.status, 'CONFLICT');
+  assert.deepEqual(coverage.conflictingFindingIds, ['f1']);
+  assert.deepEqual(coverage.internallyConflictingFindingIds, ['f1']);
+  assert.deepEqual(coverage.familyConflictingFindingIds, []);
+  assert.equal(audit.families[0].qualification.approvedDecision, null);
+});
+
+test('explicit chronology selects the applicable same-action decision without changing history', () => {
+  const decisions = [
+    { ...humanDecision('f1', 'KEEP_JUSTIFIED', 'Earlier', 'alice'), decidedAt: '2026-01-01T00:00:00.000Z' },
+    { ...humanDecision('f1', 'KEEP_JUSTIFIED', 'Later', 'bob'), decidedAt: '2026-02-01T00:00:00.000Z' },
+  ];
+  const family = buildCloneAudit(runWithFindings([fixtureFinding('f1', 'src/a.js', 1, 5, 'src/b.js', 10, 14)]), { decisions }).families[0];
+  assert.equal(family.decisionCoverage.decisionHistory.length, 2);
+  assert.equal(family.decisionCoverage.decisions[0].decisionStatus, 'EFFECTIVE');
+  assert.equal(family.decisionCoverage.decisions[0].reason, 'Later');
+  assert.equal(family.qualification.approvedDecision.reason, 'Later');
+  assert.equal(family.qualification.approvedDecision.reviewer, 'bob');
+});
+
+test('malformed decision bundles are diagnosed and cannot produce an approval', () => {
+  const audit = buildCloneAudit(runWithFindings([fixtureFinding('f1', 'src/a.js', 1, 5, 'src/b.js', 10, 14)]), {
+    decisions: { schemaVersion: '0.1-draft', decisions: 'not-an-array' },
+  });
+  const family = audit.families[0];
+  assert.equal(audit.evidenceContext.decisions, 'INVALID');
+  assert.equal(audit.diagnostics.some((diagnostic) => diagnostic.code === 'DECISION_BUNDLE_INVALID'), true);
+  assert.equal(family.qualification.approvedDecision, null);
+  assert.equal(family.decisionCoverage.inputStatus, 'INVALID');
+});
+
+test('decision bundles and arrays share the same normalized provenance', () => {
+  const decision = humanDecision('f1', 'KEEP_JUSTIFIED', 'Compatibility exception', 'alice');
+  const run = runWithFindings([fixtureFinding('f1', 'src/a.js', 1, 5, 'src/b.js', 10, 14)]);
+  const arrayAudit = buildCloneAudit(run, { decisions: [decision] });
+  const bundleAudit = buildCloneAudit(run, { decisions: { schemaVersion: '0.1-draft', decisions: [decision] } });
+  assert.equal(arrayAudit.evidenceContext.decisions, 'SUPPLIED');
+  assert.equal(bundleAudit.evidenceContext.decisions, 'SUPPLIED');
+  assert.deepEqual(bundleAudit.families[0].decisionCoverage, arrayAudit.families[0].decisionCoverage);
+  assert.deepEqual(bundleAudit.families[0].qualification.decisions, arrayAudit.families[0].qualification.decisions);
 });
 
 test('compatible decisions cover every finding before a family can be justified', () => {
