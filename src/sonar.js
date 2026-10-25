@@ -340,7 +340,12 @@ function importSonarExport(root, filePath) {
 
   if (Number.isInteger(reportedTotal) && reportedTotal > effectiveLimit) markIncomplete('RESULT_LIMIT_REACHED', `SonarQube reported ${reportedTotal} results; only the configured limit ${effectiveLimit} can be imported.`);
   if (Number.isInteger(reportedTotal) && actualCount > reportedTotal) markIncomplete('EXPORT_COUNT_EXCEEDS_TOTAL', `The browser export contains ${actualCount} issues for a reported total of ${reportedTotal}.`);
-  if (Number.isInteger(pagination?.exportedCount) && pagination.exportedCount !== actualCount) markIncomplete('EXPORT_COUNT_MISMATCH', `The export declares ${pagination.exportedCount} findings but its pages contain ${actualCount}.`);
+  const hasExportedCount = Boolean(pagination && Object.prototype.hasOwnProperty.call(pagination, 'exportedCount'));
+  const exportedCount = pagination?.exportedCount;
+  if (!hasExportedCount) markIncomplete('EXPORT_COUNT_UNAVAILABLE', 'The browser export must declare exportedCount so the stored finding count can be verified.');
+  else if (!Number.isInteger(exportedCount)) markIncomplete('EXPORT_COUNT_INVALID', 'The browser export must declare exportedCount as an integer.');
+  else if (exportedCount < 0) markIncomplete('EXPORT_COUNT_NEGATIVE', 'The browser export must declare exportedCount as a non-negative integer.');
+  else if (exportedCount !== actualCount) markIncomplete('EXPORT_COUNT_MISMATCH', `The export declares ${exportedCount} findings but its pages contain ${actualCount}.`);
   const expectedCount = reportedTotal === null ? null : Math.min(reportedTotal, effectiveLimit);
   if (expectedCount !== null && actualCount !== expectedCount) markIncomplete('EXPORT_PAGINATION_INCOMPLETE', `The browser export contains ${actualCount} issues for an expected count of ${expectedCount}; absence cannot be inferred.`);
   const calculatedLimitReached = reportedTotal !== null && reportedTotal > effectiveLimit;

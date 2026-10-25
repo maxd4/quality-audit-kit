@@ -350,6 +350,48 @@ test('browser export importer recalculates completeness and rejects empty or con
   }
 });
 
+test('browser export importer requires a valid exportedCount and preserves findings and failure status', () => {
+  const issueA = { key: 'ISSUE-A', component: 'demo-project:src/a.js', rule: 'js:Rule', message: 'A' };
+  const issueB = { key: 'ISSUE-B', component: 'demo-project:src/b.js', rule: 'js:Rule', message: 'B' };
+  const issueC = { key: 'ISSUE-C', component: 'demo-project:src/c.js', rule: 'js:Rule', message: 'C' };
+  const pages = [issuePage(1, 2, 3, [issueA, issueB], 2), issuePage(2, 2, 3, [issueC], 2)];
+  const cases = [
+    { name: 'absent', code: 'EXPORT_COUNT_UNAVAILABLE', change: (payload) => { delete payload.issues.pagination.exportedCount; } },
+    { name: 'null', code: 'EXPORT_COUNT_INVALID', value: null },
+    { name: 'string', code: 'EXPORT_COUNT_INVALID', value: '3' },
+    { name: 'negative', code: 'EXPORT_COUNT_NEGATIVE', value: -1 },
+    { name: 'contradictory', code: 'EXPORT_COUNT_MISMATCH', value: 2 },
+    { name: 'valid', value: 3, expectedStatus: 'MEASURED' },
+  ];
+  const fixtures = [];
+  try {
+    for (const testCase of cases) {
+      const payload = browserPayload({ pages, reportedTotal: 3, pageSize: 2 });
+      if (testCase.change) testCase.change(payload);
+      else payload.issues.pagination.exportedCount = testCase.value;
+      const fixture = writeBrowserPayload(payload);
+      fixtures.push(fixture);
+      const imported = importSonarExport(fixture.repository, fixture.filePath);
+      assert.equal(imported.status, testCase.expectedStatus || 'PARTIAL', testCase.name);
+      assert.equal(imported.findings.length, 3, testCase.name);
+      assert.deepEqual(imported.findings.map((finding) => finding.rawReference), [
+        'sonarqube://issues/ISSUE-A',
+        'sonarqube://issues/ISSUE-B',
+        'sonarqube://issues/ISSUE-C',
+      ], testCase.name);
+      if (testCase.code) assert.ok(imported.diagnostics.some((item) => item.code === testCase.code), testCase.name);
+      assert.equal(imported.diagnostics.some((item) => /token|secret/i.test(String(item.message))), false, testCase.name);
+    }
+
+    const failurePayload = browserPayload({ pages, reportedTotal: 3, pageSize: 2, status: 'FAILURE' });
+    const failure = writeBrowserPayload(failurePayload);
+    fixtures.push(failure);
+    assert.equal(importSonarExport(failure.repository, failure.filePath).status, 'FAILURE');
+  } finally {
+    for (const fixture of fixtures) fs.rmSync(fixture.repository, { recursive: true, force: true });
+  }
+});
+
 test('browser export importer refuses missing page metadata, counter drift and never upgrades revisions to VERIFIED', () => {
   const malformed = writeBrowserPayload(browserPayload({
     pages: [{ request: { p: 1, ps: 1 }, response: { paging: { total: 1, pageIndex: 1 }, issues: [{ key: 'ISSUE-1' }] } }],
