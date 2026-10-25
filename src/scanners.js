@@ -19,6 +19,14 @@ const EXPECTED_FINDING_EXIT_CODES = {
   jscpd: new Set([0, 1]),
 };
 
+function affectsMeasurement(diagnostic) {
+  return diagnostic?.measurementImpact !== 'NONE';
+}
+
+function measurementDiagnostics(diagnostics) {
+  return diagnostics.filter(affectsMeasurement);
+}
+
 function unknownSourceRevision(basis) {
   return { status: 'UNKNOWN', sha: null, basis };
 }
@@ -139,12 +147,13 @@ async function loadOrRunScanner({ root, scanner, explicitReport, executeScanner,
       : normalizeJscpd(root, parsed, provenance);
     const findings = Array.isArray(normalized) ? normalized : normalized.findings;
     const diagnostics = Array.isArray(normalized?.diagnostics) ? normalized.diagnostics : [];
+    const blockingDiagnostics = measurementDiagnostics(diagnostics);
     return {
-      status: diagnostics.length ? 'PARTIAL' : 'MEASURED',
-      gateOutcome: diagnostics.length ? 'NOT_EVALUATED' : 'INFORMATIVE',
+      status: blockingDiagnostics.length ? 'PARTIAL' : 'MEASURED',
+      gateOutcome: blockingDiagnostics.length ? 'NOT_EVALUATED' : 'INFORMATIVE',
       sourceRevision,
       ...(result.exitCode !== 0 ? { diagnostic: `${scanner} exited with expected findings code ${result.exitCode}; JSON report was normalized.` } : {}),
-      ...(diagnostics.length ? { diagnostic: `${scanner} report was normalized with ${diagnostics.length} completeness diagnostic(s).` } : {}),
+      ...(diagnostics.length ? { diagnostic: `${scanner} report was normalized with ${diagnostics.length} diagnostic(s)${blockingDiagnostics.length ? `, including ${blockingDiagnostics.length} completeness diagnostic(s)` : '; all are informative transformations'}.` } : {}),
       diagnostics,
       findings,
     };
@@ -164,11 +173,12 @@ function readAndNormalize(root, scanner, reportPath, sourceKind, sourceRevision)
       : normalizeJscpd(root, parsed, provenance);
     const findings = Array.isArray(normalized) ? normalized : normalized.findings;
     const diagnostics = Array.isArray(normalized?.diagnostics) ? normalized.diagnostics : [];
+    const blockingDiagnostics = measurementDiagnostics(diagnostics);
     return {
-      status: diagnostics.length ? 'PARTIAL' : 'MEASURED',
-      gateOutcome: diagnostics.length ? 'NOT_EVALUATED' : 'INFORMATIVE',
+      status: blockingDiagnostics.length ? 'PARTIAL' : 'MEASURED',
+      gateOutcome: blockingDiagnostics.length ? 'NOT_EVALUATED' : 'INFORMATIVE',
       sourceRevision,
-      ...(diagnostics.length ? { diagnostic: `jscpd report was normalized with ${diagnostics.length} completeness diagnostic(s).` } : {}),
+      ...(diagnostics.length ? { diagnostic: `${scanner} report was normalized with ${diagnostics.length} diagnostic(s)${blockingDiagnostics.length ? `, including ${blockingDiagnostics.length} completeness diagnostic(s)` : '; all are informative transformations'}.` } : {}),
       diagnostics,
       findings,
     };

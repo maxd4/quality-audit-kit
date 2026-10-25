@@ -8,6 +8,7 @@ const test = require('node:test');
 const { buildCloneAudit, renderCloneMarkdown } = require('../src/clone-triage');
 const { assessMeasuredRun, compareRuns } = require('../src/history');
 const { normalizeJscpd } = require('../src/normalize');
+const { loadOrRunScanner } = require('../src/scanners');
 const { buildStructuredReport, renderMarkdown } = require('../src/report');
 
 function runWithFindings(findings) {
@@ -103,10 +104,78 @@ test('strictly repeated pairs are deduplicated while native identities remain di
   const duplicate = { fingerprint: 'native-1', lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 1, end: 5 }, secondFile: { name: 'src/b.js', start: 20, end: 24 } };
   const findings = normalizeJscpd('C:/repo', { duplicates: [duplicate, JSON.parse(JSON.stringify(duplicate))] }, { kind: 'REPORT', reference: 'fixture', sourceRevision: { status: 'UNKNOWN', sha: null, basis: 'fixture' } });
   assert.equal(findings.length, 1);
-  assert.equal(findings.diagnostics.filter((diagnostic) => diagnostic.code === 'CLONE_DUPLICATE_DEDUPLICATED').length, 1);
+  const deduplication = findings.diagnostics.find((diagnostic) => diagnostic.code === 'CLONE_DUPLICATE_DEDUPLICATED');
+  assert.ok(deduplication);
+  assert.equal(deduplication.classification, 'INFORMATIVE_TRANSFORMATION');
+  assert.equal(deduplication.measurementImpact, 'NONE');
   const differentFingerprint = normalizeJscpd('C:/repo', { duplicates: [duplicate, { ...duplicate, fingerprint: 'native-2' }] }, { kind: 'REPORT', reference: 'fixture', sourceRevision: { status: 'UNKNOWN', sha: null, basis: 'fixture' } });
   assert.equal(differentFingerprint.length, 2);
   assert.notEqual(differentFingerprint[0].id, differentFingerprint[1].id);
+});
+
+test('jscpd deduplication stays measured while contradictory repeats remain partial', async () => {
+  const duplicate = { fingerprint: 'native-1', lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 1, end: 5 }, secondFile: { name: 'src/b.js', start: 20, end: 24 } };
+  const provenance = { kind: 'REPORT', reference: 'fixture', sourceRevision: { status: 'UNKNOWN', sha: null, basis: 'fixture' } };
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-jscpd-status-'));
+  const reportPath = path.join(repository, 'jscpd-report.json');
+  const scan = async (duplicates) => {
+    fs.writeFileSync(reportPath, JSON.stringify({ duplicates }), 'utf8');
+    return loadOrRunScanner({ root: repository, scanner: 'jscpd', explicitReport: reportPath, executeScanner: false });
+  };
+  try {
+    const deduplicated = await scan([duplicate, JSON.parse(JSON.stringify(duplicate)), { ...duplicate, fingerprint: 'native-2', firstFile: { name: 'src/c.js', start: 30, end: 34 }, secondFile: { name: 'src/d.js', start: 40, end: 44 } }]);
+    assert.equal(deduplicated.status, 'MEASURED');
+    assert.equal(deduplicated.findings.length, 2);
+    assert.equal(deduplicated.diagnostics.filter((diagnostic) => diagnostic.measurementImpact !== 'NONE').length, 0);
+    const measuredRun = runWithFindings(deduplicated.findings);
+    measuredRun.engines[0].measurementStatus = deduplicated.status;
+    measuredRun.diagnostics = deduplicated.diagnostics;
+    const measuredAudit = buildCloneAudit(measuredRun);
+    assert.equal(measuredAudit.status, 'MEASURED');
+    assert.equal(measuredAudit.evidenceContext.cloneEvidence, 'FINDINGS_PRESENT_COMPLETE');
+
+    const inverted = await scan([duplicate, {
+      ...duplicate,
+      firstFile: duplicate.secondFile,
+      secondFile: duplicate.firstFile,
+    }]);
+    assert.equal(inverted.status, 'MEASURED');
+    assert.equal(inverted.findings.length, 1);
+    assert.equal(inverted.diagnostics.find((diagnostic) => diagnostic.code === 'CLONE_DUPLICATE_DEDUPLICATED').measurementImpact, 'NONE');
+
+    const contradictory = await scan([duplicate, { ...duplicate, lines: 6 }]);
+    assert.equal(contradictory.findings.length, 1);
+    assert.equal(contradictory.status, 'PARTIAL');
+    assert.equal(contradictory.diagnostics.some((diagnostic) => diagnostic.code === 'CLONE_DUPLICATE_CONTRADICTORY'), true);
+    assert.equal(contradictory.diagnostics.find((diagnostic) => diagnostic.code === 'CLONE_DUPLICATE_CONTRADICTORY').measurementImpact, 'PARTIAL');
+    const contradictoryRun = runWithFindings(contradictory.findings);
+    contradictoryRun.engines[0].measurementStatus = 'MEASURED';
+    contradictoryRun.diagnostics = contradictory.diagnostics;
+    const contradictoryAudit = buildCloneAudit(contradictoryRun);
+    assert.equal(contradictoryAudit.status, 'PARTIAL');
+    assert.equal(contradictoryAudit.evidenceContext.cloneEvidence, 'FINDINGS_PRESENT_PARTIAL');
+    assert.equal(contradictoryAudit.diagnostics.some((diagnostic) => diagnostic.code === 'CLONE_DIAGNOSTICS_INCOMPLETE'), true);
+
+    for (const malformed of [
+      { name: 'missing path', duplicate: { ...duplicate, secondFile: {} }, code: 'CLONE_PATH_MISSING' },
+      { name: 'invalid range', duplicate: { ...duplicate, firstFile: { name: 'src/a.js', start: 0, end: 5 } }, code: 'CLONE_RANGE_INVALID' },
+      { name: 'missing metrics', duplicate: { ...duplicate, lines: undefined, tokens: undefined, percentage: undefined }, code: 'CLONE_METRICS_UNAVAILABLE' },
+    ]) {
+      const partial = await scan([duplicate, malformed.duplicate]);
+      assert.equal(partial.status, 'PARTIAL', malformed.name);
+      assert.equal(partial.findings.length, ['CLONE_PATH_MISSING', 'CLONE_METRICS_UNAVAILABLE'].includes(malformed.code) ? 1 : 2, malformed.name);
+      assert.equal(partial.diagnostics.some((diagnostic) => diagnostic.code === malformed.code && diagnostic.measurementImpact !== 'NONE'), true, malformed.name);
+    }
+
+    const zero = await scan([]);
+    assert.equal(zero.status, 'MEASURED');
+    const zeroRun = runWithFindings(zero.findings);
+    zeroRun.engines[0].measurementStatus = zero.status;
+    zeroRun.diagnostics = zero.diagnostics;
+    assert.equal(buildCloneAudit(zeroRun).evidenceContext.cloneEvidence, 'MEASURED_ZERO');
+  } finally {
+    fs.rmSync(repository, { recursive: true, force: true });
+  }
 });
 
 test('normalized clone findings remain eligible for historical comparison without duplicate IDs', () => {

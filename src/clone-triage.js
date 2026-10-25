@@ -329,10 +329,11 @@ function effortFor(family) {
   return 'HIGH';
 }
 
-function cloneMeasurementStatus(jscpdEngine, allFindings, cloneFindings, families) {
+function cloneMeasurementStatus(jscpdEngine, allFindings, cloneFindings, families, runDiagnostics = []) {
   const declaredStatus = jscpdEngine?.measurementStatus;
   const jscpdFindings = allFindings.filter((finding) => finding.engine === 'jscpd');
   const hasUnenrichedJscpdFindings = jscpdFindings.some((finding) => !finding.clone || !Array.isArray(finding.clone.occurrences));
+  const blockingDiagnostics = runDiagnostics.filter((diagnostic) => diagnostic?.kind === 'JSCPD_DIAGNOSTIC' && diagnostic.measurementImpact !== 'NONE');
   if (!jscpdEngine) return { status: 'INSUFFICIENT_DATA', evidence: 'UNAVAILABLE', diagnostic: { code: 'CLONE_ENGINE_MISSING', message: 'No jscpd engine measurement was declared; clone conclusions are unavailable.' } };
   if (!MEASUREMENT_STATUSES.has(declaredStatus)) {
     return { status: 'INSUFFICIENT_DATA', evidence: 'UNAVAILABLE', diagnostic: { code: 'CLONE_ENGINE_STATUS_UNKNOWN', message: `jscpd declared an unsupported or missing measurement status: ${declaredStatus || 'UNKNOWN'}.` } };
@@ -344,6 +345,13 @@ function cloneMeasurementStatus(jscpdEngine, allFindings, cloneFindings, familie
       diagnostic: cloneFindings.length
         ? { code: 'CLONE_ENGINE_STATUS_CONTRADICTION', message: `jscpd findings are present, but the declared engine measurement status is ${declaredStatus}; clone conclusions remain ${declaredStatus}.` }
         : null,
+    };
+  }
+  if (blockingDiagnostics.length) {
+    return {
+      status: 'PARTIAL',
+      evidence: cloneFindings.length ? 'FINDINGS_PRESENT_PARTIAL' : 'UNAVAILABLE',
+      diagnostic: { code: 'CLONE_DIAGNOSTICS_INCOMPLETE', message: `jscpd retained ${blockingDiagnostics.length} diagnostic(s) that limit completeness: ${blockingDiagnostics.map((diagnostic) => diagnostic.code).sort().join(', ')}.` },
     };
   }
   if (hasUnenrichedJscpdFindings) {
@@ -452,7 +460,7 @@ function buildCloneAudit(run, options = {}) {
   const decisionInput = normalizeDecisionInput(rawDecisions, hasOptionDecisions || hasRunDecisions);
   const annotations = options.annotations || run?.cloneAnnotations || {};
   const families = [...groups.values()].map((group) => buildFamily(group, decisionInput, annotations)).sort((left, right) => left.id.localeCompare(right.id));
-  const measurement = cloneMeasurementStatus(jscpdEngine, allFindings, cloneFindings, families);
+  const measurement = cloneMeasurementStatus(jscpdEngine, allFindings, cloneFindings, families, Array.isArray(run?.diagnostics) ? run.diagnostics : []);
   if (measurement.diagnostic && !diagnostics.some((diagnostic) => diagnostic.code === measurement.diagnostic.code)) diagnostics.push(measurement.diagnostic);
   for (const diagnostic of decisionInput.diagnostics) diagnostics.push(diagnostic);
   const prompts = families.filter((family) => family.promptEligible || family.reviewPromptEligible).map((family) => ({

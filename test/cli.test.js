@@ -772,12 +772,20 @@ test('scan imports Knip and jscpd reports into one stable contract', () => {
       files: ['packages/app/old.js'],
     }));
     fs.writeFileSync(path.join(repository, 'jscpd-report.json'), JSON.stringify({
-      duplicates: [{
-        lines: 24,
-        format: { percentage: 12 },
-        firstFile: { name: 'packages/app/a.js', start: 3, end: 26 },
-        secondFile: { name: 'packages/app/b.js', start: 8, end: 31 },
-      }],
+      duplicates: [
+        {
+          lines: 24,
+          format: { percentage: 12 },
+          firstFile: { name: 'packages/app/a.js', start: 3, end: 26 },
+          secondFile: { name: 'packages/app/b.js', start: 8, end: 31 },
+        },
+        {
+          lines: 24,
+          format: { percentage: 12 },
+          firstFile: { name: 'packages/app/a.js', start: 3, end: 26 },
+          secondFile: { name: 'packages/app/b.js', start: 8, end: 31 },
+        },
+      ],
     }));
     const first = runCli(repository, ['scan', '--output', 'run-one.json']);
     const second = runCli(repository, ['scan', '--output', 'run-two.json']);
@@ -787,6 +795,10 @@ test('scan imports Knip and jscpd reports into one stable contract', () => {
     const runTwo = JSON.parse(fs.readFileSync(path.join(repository, 'run-two.json'), 'utf8'));
     assert.equal(runOne.inputScope, 'WORKTREE_LIVE');
     assert.equal(runOne.engines.every((engine) => engine.measurementStatus === 'MEASURED'), true);
+    assert.equal(runOne.engines.find((engine) => engine.name === 'jscpd').measurementStatus, 'MEASURED');
+    assert.equal(runOne.clones.status, 'MEASURED');
+    assert.equal(runOne.clones.evidenceContext.cloneEvidence, 'FINDINGS_PRESENT_COMPLETE');
+    assert.equal(runOne.diagnostics.find((diagnostic) => diagnostic.code === 'CLONE_DUPLICATE_DEDUPLICATED').measurementImpact, 'NONE');
     assert.equal(runOne.findings.length, 3);
     assert.equal(runOne.findings.every((finding) => finding.measurementStatus === 'MEASURED'), true);
     assert.equal(runOne.findings.every((finding) => finding.lifecycle === 'UNCLASSIFIED'), true);

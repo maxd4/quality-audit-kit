@@ -40,6 +40,28 @@ function jscpdNativeFingerprint(duplicate) {
     .find((value) => value !== undefined && value !== null && String(value).trim() !== '');
 }
 
+function jscpdDiagnostic({ code, reference, message, classification = 'INCOMPLETE_DATA', measurementImpact = 'PARTIAL', details }) {
+  return {
+    kind: 'JSCPD_DIAGNOSTIC',
+    code,
+    reference,
+    message,
+    classification,
+    measurementImpact,
+    ...(details ? { details } : {}),
+  };
+}
+
+function jscpdObservationKey(occurrences, metrics, nativeFingerprint) {
+  return JSON.stringify({
+    occurrences: occurrences
+      .map((occurrence) => ({ path: occurrence.path, startLine: occurrence.startLine, endLine: occurrence.endLine }))
+      .sort((left, right) => jscpdOccurrenceKey(left).localeCompare(jscpdOccurrenceKey(right))),
+    metrics,
+    nativeFingerprint: nativeFingerprint === undefined || nativeFingerprint === null ? null : String(nativeFingerprint),
+  });
+}
+
 function severity(value, fallback = 'INFO') {
   const normalized = String(value || '').toUpperCase();
   if (SEVERITIES.includes(normalized)) return normalized;
@@ -242,6 +264,8 @@ function normalizeJscpd(root, report, provenance) {
   const diagnostics = [];
   const findings = [];
   const findingIds = new Set();
+  const observationsByFindingId = new Map();
+  const observationsByPairIdentity = new Map();
   const nativeFingerprintCounts = new Map();
   for (const duplicate of duplicates) {
     const fingerprint = jscpdNativeFingerprint(duplicate);
@@ -252,26 +276,30 @@ function normalizeJscpd(root, report, provenance) {
   for (const [index, duplicate] of duplicates.entries()) {
     const first = duplicate?.firstFile || duplicate?.first || {};
     const second = duplicate?.secondFile || duplicate?.second || {};
-    const firstPath = first.name || first.path || duplicate?.firstFile;
-    const secondPath = second.name || second.path || duplicate?.secondFile;
+    const pathFrom = (file, fallback) => {
+      const candidate = typeof file === 'string' ? file : file?.name || file?.path || (typeof fallback === 'string' ? fallback : null);
+      return typeof candidate === 'string' && candidate.trim() ? candidate : null;
+    };
+    const firstPath = pathFrom(first, duplicate?.firstFile);
+    const secondPath = pathFrom(second, duplicate?.secondFile);
     const reference = `jscpd://duplicates/${index}`;
     if (!firstPath || !secondPath) {
-      diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_PATH_MISSING', reference, message: 'jscpd duplicate did not provide both file paths; the clone was not retained.' });
+      diagnostics.push(jscpdDiagnostic({ code: 'CLONE_PATH_MISSING', reference, message: 'jscpd duplicate did not provide both file paths; the clone was not retained.' }));
       continue;
     }
     const firstRelative = safeRelativePath(root, firstPath);
     const secondRelative = safeRelativePath(root, secondPath);
-    if (firstRelative.startsWith('external/')) diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_PATH_OUTSIDE_REPOSITORY', reference, message: 'jscpd first file is outside the repository; an external placeholder path was retained.' });
-    if (secondRelative.startsWith('external/')) diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_PATH_OUTSIDE_REPOSITORY', reference, message: 'jscpd second file is outside the repository; an external placeholder path was retained.' });
+    if (firstRelative.startsWith('external/')) diagnostics.push(jscpdDiagnostic({ code: 'CLONE_PATH_OUTSIDE_REPOSITORY', reference, message: 'jscpd first file is outside the repository; an external placeholder path was retained.' }));
+    if (secondRelative.startsWith('external/')) diagnostics.push(jscpdDiagnostic({ code: 'CLONE_PATH_OUTSIDE_REPOSITORY', reference, message: 'jscpd second file is outside the repository; an external placeholder path was retained.' }));
     const range = (file, side) => {
       const start = Number(file?.start ?? file?.startLine);
       const end = Number(file?.end ?? file?.endLine);
       if (!Number.isInteger(start) || !Number.isInteger(end)) {
-        diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_RANGE_UNAVAILABLE', reference, message: `jscpd ${side} file has no complete integer line range.` });
+        diagnostics.push(jscpdDiagnostic({ code: 'CLONE_RANGE_UNAVAILABLE', reference, message: `jscpd ${side} file has no complete integer line range.` }));
         return { startLine: null, endLine: null };
       }
       if (start < 1 || end < start) {
-        diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_RANGE_INVALID', reference, message: `jscpd ${side} file has an invalid line range.` });
+        diagnostics.push(jscpdDiagnostic({ code: 'CLONE_RANGE_INVALID', reference, message: `jscpd ${side} file has an invalid line range.`, classification: 'INVALID_DATA' }));
         return { startLine: null, endLine: null };
       }
       return { startLine: start, endLine: end };
@@ -284,7 +312,7 @@ function normalizeJscpd(root, report, provenance) {
     const tokens = numeric(duplicate?.tokens ?? duplicate?.format?.tokens);
     const chars = numeric(duplicate?.chars ?? duplicate?.format?.chars);
     const fragment = duplicate?.fragment ?? duplicate?.format?.fragment ?? null;
-    if (percentage === null && lines === null && tokens === null && chars === null && fragment === null) diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_METRICS_UNAVAILABLE', reference, message: 'jscpd duplicate did not provide a usable clone metric.' });
+    if (percentage === null && lines === null && tokens === null && chars === null && fragment === null) diagnostics.push(jscpdDiagnostic({ code: 'CLONE_METRICS_UNAVAILABLE', reference, message: 'jscpd duplicate did not provide a usable clone metric.' }));
     const severityLines = lines ?? (firstRange.startLine !== null ? firstRange.endLine - firstRange.startLine + 1 : 0);
     const derivedSeverity = percentage !== null && percentage >= 20 || severityLines >= 50
       ? 'HIGH'
@@ -321,11 +349,44 @@ function normalizeJscpd(root, report, provenance) {
       provenance,
       rawReference: reference,
     });
+    const observationKey = jscpdObservationKey(occurrences, { lines, percentage, tokens, chars, fragment }, nativeFingerprint);
+    const pairIdentity = `${nativeFingerprint === undefined || nativeFingerprint === null ? 'NO_NATIVE_FINGERPRINT' : String(nativeFingerprint)}|${pairKey}`;
+    const previousPair = observationsByPairIdentity.get(pairIdentity);
+    if (previousPair && previousPair.key !== observationKey) {
+      diagnostics.push(jscpdDiagnostic({
+        code: 'CLONE_DUPLICATE_CONTRADICTORY',
+        reference,
+        message: 'jscpd repeated a clone pair with contradictory occurrence or metric data; the conflicting entry was not treated as a complete measurement.',
+        classification: 'CONTRADICTORY_DATA',
+        details: { retainedReference: previousPair.reference },
+      }));
+      continue;
+    }
     if (findingIds.has(finding.id)) {
-      diagnostics.push({ kind: 'JSCPD_DIAGNOSTIC', code: 'CLONE_DUPLICATE_DEDUPLICATED', reference, message: 'jscpd repeated an identical clone pair; the duplicate was omitted from canonical findings.' });
+      const previous = observationsByFindingId.get(finding.id);
+      if (previous?.key === observationKey) {
+        diagnostics.push(jscpdDiagnostic({
+          code: 'CLONE_DUPLICATE_DEDUPLICATED',
+          reference,
+          message: 'jscpd repeated an identical clone pair; the duplicate was omitted from canonical findings.',
+          classification: 'INFORMATIVE_TRANSFORMATION',
+          measurementImpact: 'NONE',
+          details: { retainedReference: previous.reference },
+        }));
+      } else {
+        diagnostics.push(jscpdDiagnostic({
+          code: 'CLONE_DUPLICATE_CONTRADICTORY',
+          reference,
+          message: 'jscpd repeated a clone identity with contradictory occurrence or metric data; the conflicting entry was not treated as a complete measurement.',
+          classification: 'CONTRADICTORY_DATA',
+          details: { retainedReference: previous.reference },
+        }));
+      }
       continue;
     }
     findingIds.add(finding.id);
+    observationsByFindingId.set(finding.id, { key: observationKey, reference });
+    observationsByPairIdentity.set(pairIdentity, { key: observationKey, reference });
     finding.clone = {
       scope: firstRelative === secondRelative ? 'INTRA_FILE' : 'INTER_FILE',
       grouping: nativeFingerprint
