@@ -168,6 +168,12 @@
       const remaining = config.maxResults - base.issues.pagination.exportedCount;
       const pageIssues = assessment.issues.slice(0, Math.min(remaining, requestSize));
       if (assessment.diagnostics.length) partial = true;
+      const moreResultsAreExpected = assessment.total !== null && page * requestSize < assessment.total;
+      const pageIsLocallyLimited = remaining < requestSize;
+      if (moreResultsAreExpected && assessment.issues.length < requestSize && !pageIsLocallyLimited) {
+        partial = true;
+        base.diagnostics.push(diagnostic('PAGINATION_PAGE_SHORT_BEFORE_FINAL', `/api/issues/search?p=${page}`, `SonarQube returned ${assessment.issues.length} issues for an intermediate page that should contain ${requestSize}.`));
+      }
       if (assessment.issues.length > pageIssues.length && remaining < requestSize) {
         partial = true;
         base.diagnostics.push(diagnostic('RESULT_LIMIT_TRUNCATED_PAGE', `/api/issues/search?p=${page}`, `The final stored page was truncated from ${assessment.issues.length} to ${pageIssues.length} issues to respect the configured limit ${config.maxResults}.`));

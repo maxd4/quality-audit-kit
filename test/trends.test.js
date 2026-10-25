@@ -188,6 +188,14 @@ test('requires complete coverage, scope, engine versions and metric definitions 
   assert.equal(missingCoverageResult.contract.checks.current.coverage, false);
   assert.match(missingCoverageResult.contract.reasons.join(' '), /no maintainabilityCoverage inventory/i);
 
+  for (const coverageStatus of ['PARTIAL', 'FAILURE']) {
+    const incompleteCoverage = makeRun({ runKey: `coverage-${coverageStatus.toLowerCase()}`, source: 'f', coverageStatus });
+    const incompleteCoverageResult = compareMaintainabilityRuns(previous, incompleteCoverage);
+    assert.equal(incompleteCoverageResult.status, 'NOT_COMPARABLE');
+    assert.equal(incompleteCoverageResult.functions.length, 0);
+    assert.match(incompleteCoverageResult.contract.reasons.join(' '), new RegExp(`maintainability coverage is ${coverageStatus}`, 'i'));
+  }
+
   const contradictoryCoverage = makeRun({ runKey: 'coverage-contradiction', source: 'f' });
   contradictoryCoverage.maintainabilityCoverage.functionsMeasured = 0;
   const contradictoryCoverageResult = compareMaintainabilityRuns(previous, contradictoryCoverage);
@@ -213,6 +221,48 @@ test('requires complete coverage, scope, engine versions and metric definitions 
   const contradictoryEngineResult = compareMaintainabilityRuns(previous, contradictoryEngine);
   assert.equal(contradictoryEngineResult.status, 'NOT_COMPARABLE');
   assert.match(contradictoryEngineResult.contract.reasons.join(' '), /engine version/i);
+
+  const missingPreviousSchema = { ...previous };
+  delete missingPreviousSchema.schemaVersion;
+  const missingSchemaResult = compareMaintainabilityRuns(missingPreviousSchema, current);
+  assert.equal(missingSchemaResult.status, 'NOT_COMPARABLE');
+  assert.equal(missingSchemaResult.functions.length, 0);
+  assert.match(missingSchemaResult.contract.reasons.join(' '), /schemaVersion/i);
+
+  const wrongCurrentSchema = { ...current, schemaVersion: '9.9' };
+  const wrongSchemaResult = compareMaintainabilityRuns(previous, wrongCurrentSchema);
+  assert.equal(wrongSchemaResult.status, 'NOT_COMPARABLE');
+  assert.equal(wrongSchemaResult.functions.length, 0);
+  assert.match(wrongSchemaResult.contract.reasons.join(' '), /schemaVersion/i);
+
+  const missingCoverageBothPrevious = { ...previous };
+  const missingCoverageBothCurrent = { ...current };
+  delete missingCoverageBothPrevious.maintainabilityCoverage;
+  delete missingCoverageBothCurrent.maintainabilityCoverage;
+  const missingCoverageBothResult = compareMaintainabilityRuns(missingCoverageBothPrevious, missingCoverageBothCurrent);
+  assert.equal(missingCoverageBothResult.status, 'NOT_COMPARABLE');
+  assert.equal(missingCoverageBothResult.functions.length, 0);
+  assert.match(missingCoverageBothResult.contract.reasons.join(' '), /no maintainabilityCoverage inventory/i);
+
+  const missingCoverageSchema = makeRun({ runKey: 'missing-coverage-schema', source: 'f' });
+  delete missingCoverageSchema.maintainabilityCoverage.schemaVersion;
+  const missingCoverageSchemaResult = compareMaintainabilityRuns(previous, missingCoverageSchema);
+  assert.equal(missingCoverageSchemaResult.status, 'NOT_COMPARABLE');
+  assert.equal(missingCoverageSchemaResult.functions.length, 0);
+  assert.match(missingCoverageSchemaResult.contract.reasons.join(' '), /coverage.*schemaVersion/i);
+
+  const invalidScope = makeRun({ runKey: 'invalid-scope', source: 'f', inputScope: 'UNSCOPED' });
+  const invalidScopeResult = compareMaintainabilityRuns(previous, invalidScope);
+  assert.equal(invalidScopeResult.status, 'NOT_COMPARABLE');
+  assert.equal(invalidScopeResult.functions.length, 0);
+  assert.equal(invalidScopeResult.contract.checks.current.scope, false);
+  assert.match(invalidScopeResult.contract.reasons.join(' '), /inputScope/i);
+
+  const invalidRunIdentity = { ...current, runId: 42, repository: { name: 7 } };
+  const invalidRunIdentityResult = compareMaintainabilityRuns(previous, invalidRunIdentity);
+  assert.equal(invalidRunIdentityResult.status, 'NOT_COMPARABLE');
+  assert.equal(invalidRunIdentityResult.functions.length, 0);
+  assert.match(invalidRunIdentityResult.contract.reasons.join(' '), /valid (runId|repository name)/i);
 });
 
 test('does not count a fully non-comparable function as comparable', () => {

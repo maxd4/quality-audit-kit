@@ -8,6 +8,8 @@ const SOURCE_STATUSES = new Set(['VERIFIED', 'UNVERIFIED', 'UNKNOWN']);
 const SHA_PATTERN = /^[a-f0-9]{40}$/i;
 const CONTENT_SHA_PATTERN = /^[a-f0-9]{64}$/i;
 const KNOWN_METRIC_IDS = ['cognitiveComplexity', 'cyclomaticComplexity', 'functionLength', 'decisionCount', 'maxDecisionDepth', 'nestedDecisionCount', 'maxSubtreeDecisionCount'];
+const RUN_SCHEMA_VERSION = '0.1-draft';
+const INPUT_SCOPES = new Set(['COMMITTED_SNAPSHOT', 'STAGED', 'WORKTREE_LIVE']);
 
 function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
@@ -42,6 +44,7 @@ function coverageContract(run, engine, measurements, label) {
     result.valid = false;
     return result;
   }
+  if (coverage.schemaVersion !== RUN_SCHEMA_VERSION) reasons.push(`${label} maintainability coverage has an unsupported or missing schemaVersion.`);
   if (coverage.status !== 'MEASURED') reasons.push(`${label} maintainability coverage is ${coverage.status || 'UNKNOWN'}, not fully MEASURED.`);
   const collections = ['eligibleFiles', 'measuredFiles', 'excludedFiles', 'unsupportedFiles', 'errorFiles', 'engines'];
   for (const field of collections) if (!Array.isArray(coverage[field])) reasons.push(`${label} maintainability coverage has no valid ${field} collection.`);
@@ -101,8 +104,9 @@ function contractFor(run, label) {
   const reasons = [];
   const checks = {};
   if (!run || typeof run !== 'object' || Array.isArray(run)) reasons.push(`${label} is not a JSON object.`);
-  if (!run?.runId) reasons.push(`${label} has no runId.`);
-  if (!run?.repository?.name) reasons.push(`${label} has no repository name.`);
+  if (run?.schemaVersion !== RUN_SCHEMA_VERSION) reasons.push(`${label} has an unsupported or missing schemaVersion.`);
+  if (typeof run?.runId !== 'string' || !run.runId) reasons.push(`${label} has no valid runId.`);
+  if (typeof run?.repository?.name !== 'string' || !run.repository.name) reasons.push(`${label} has no valid repository name.`);
   const engine = engineFor(run);
   if (!engine) reasons.push(`${label} has no ${ENGINE_NAME} engine.`);
   if (!Array.isArray(run?.functionMeasurements)) reasons.push(`${label} has no functionMeasurements array; function trends are NOT_MEASURED.`);
@@ -110,7 +114,7 @@ function contractFor(run, label) {
 
   const engineRevision = revisionOf(engine?.sourceRevision);
   if (engine && (engineRevision.status !== 'VERIFIED' || !engineRevision.sha)) reasons.push(`${label} maintainability engine lacks a VERIFIED source revision.`);
-  if (typeof run?.inputScope !== 'string' || !run.inputScope) reasons.push(`${label} has no inputScope; measured scope is not demonstrated.`);
+  if (!INPUT_SCOPES.has(run?.inputScope)) reasons.push(`${label} has an unsupported or missing inputScope; measured scope is not demonstrated.`);
   const measurements = Array.isArray(run?.functionMeasurements) ? run.functionMeasurements : [];
   const coverage = coverageContract(run, engine, measurements, label);
   reasons.push(...coverage.reasons);
@@ -128,12 +132,12 @@ function contractFor(run, label) {
     if (engineRevision.sha && source.sha && engineRevision.sha !== source.sha) reasons.push(`${label} contains a function measurement attributed to a different source revision.`);
     if (measurement?.provenance?.contentSha256 !== undefined && !CONTENT_SHA_PATTERN.test(String(measurement.provenance.contentSha256))) reasons.push(`${label} contains a function measurement with an invalid content hash.`);
   }
-  checks.repository = Boolean(run?.repository?.name);
-  checks.runId = Boolean(run?.runId);
+  checks.repository = typeof run?.repository?.name === 'string' && run.repository.name.length > 0;
+  checks.runId = typeof run?.runId === 'string' && run.runId.length > 0;
   checks.sourceRevision = Boolean(engineRevision.status === 'VERIFIED' && engineRevision.sha);
   checks.measurements = Array.isArray(run?.functionMeasurements) && engine?.measurementStatus === 'MEASURED';
   checks.coverage = coverage.valid;
-  checks.scope = typeof run?.inputScope === 'string' && run.inputScope.length > 0;
+  checks.scope = INPUT_SCOPES.has(run?.inputScope);
   checks.engine = Boolean(engine && typeof engine.version === 'string' && engine.version && engineVersions.every((version) => version === engine.version));
   checks.metricDefinitions = measurements.every((measurement) => typeof measurement?.metricVersion === 'string' && measurement.metricVersion.length > 0);
   return {

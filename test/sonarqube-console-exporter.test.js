@@ -107,6 +107,77 @@ test('SonarQube browser exporter paginates same-origin simulated responses witho
   assert.deepEqual(repeated, exported);
 });
 
+test('browser exporter rejects short intermediate pages without rejecting naturally short final pages', async () => {
+  const exporter = loadExporter();
+  const location = { origin: 'https://sonar.example.invalid', href: 'https://sonar.example.invalid/project/overview?id=demo-project' };
+  const collectPages = async (pages, total, options = {}) => {
+    const requested = [];
+    const pageSize = options.pageSize || 2;
+    const exported = await exporter.collect({ maxResults: options.maxResults || total, pageSize }, {
+      location,
+      fetch: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname === '/api/server/version') return response('10.6.0.92116');
+        if (parsed.pathname === '/api/issues/search') {
+          const page = Number(parsed.searchParams.get('p'));
+          const ps = Number(parsed.searchParams.get('ps'));
+          requested.push({ page, ps });
+          return response(JSON.stringify({ paging: { total, pageIndex: page, pageSize: ps }, issues: pages[page - 1] || [] }));
+        }
+        if (parsed.pathname === '/api/project_analyses/search') return response(JSON.stringify({ analyses: [] }));
+        throw new Error(`unexpected endpoint ${parsed.pathname}`);
+      },
+      now: () => '2026-10-24T12:00:00.000Z',
+    });
+    return { exported, requested };
+  };
+
+  const threeComplete = await collectPages([[{ key: 'A' }, { key: 'B' }], [{ key: 'C' }]], 3);
+  assert.equal(threeComplete.exported.status, 'MEASURED');
+  assert.equal(threeComplete.exported.issues.pagination.status, 'COMPLETE');
+  assert.deepEqual(Array.from(threeComplete.exported.issues.pages.at(-1).response.issues, (issue) => issue.key), ['C']);
+  assert.deepEqual(threeComplete.requested.map((request) => request.ps), [2, 2]);
+
+  const threeShort = await collectPages([[{ key: 'A' }], [{ key: 'B' }, { key: 'C' }]], 3);
+  assert.equal(threeShort.exported.status, 'PARTIAL');
+  assert.equal(threeShort.exported.issues.pagination.status, 'PARTIAL');
+  assert.ok(threeShort.exported.diagnostics.some((item) => item.code === 'PAGINATION_PAGE_SHORT_BEFORE_FINAL'));
+  assert.deepEqual(Array.from(threeShort.exported.issues.pages.flatMap((page) => page.response.issues), (issue) => issue.key), ['A', 'B', 'C']);
+
+  const elevenComplete = await collectPages([
+    Array.from({ length: 5 }, (_, index) => ({ key: `A${index}` })),
+    Array.from({ length: 5 }, (_, index) => ({ key: `B${index}` })),
+    [{ key: 'C0' }],
+  ], 11, { pageSize: 5 });
+  assert.equal(elevenComplete.exported.status, 'MEASURED');
+  assert.equal(elevenComplete.exported.issues.pagination.status, 'COMPLETE');
+  assert.deepEqual(elevenComplete.requested.map((request) => request.ps), [5, 5, 5]);
+
+  const elevenShort = await collectPages([
+    Array.from({ length: 4 }, (_, index) => ({ key: `A${index}` })),
+    Array.from({ length: 5 }, (_, index) => ({ key: `B${index}` })),
+    [{ key: 'C0' }, { key: 'C1' }],
+  ], 11, { pageSize: 5 });
+  assert.equal(elevenShort.exported.status, 'PARTIAL');
+  assert.equal(elevenShort.exported.issues.pagination.status, 'PARTIAL');
+  assert.ok(elevenShort.exported.diagnostics.some((item) => item.code === 'PAGINATION_PAGE_SHORT_BEFORE_FINAL'));
+  assert.equal(elevenShort.exported.issues.pagination.exportedCount, 11);
+
+  const emptyIntermediate = await collectPages([[{ key: 'A' }, { key: 'B' }], [], [{ key: 'C' }]], 5);
+  assert.equal(emptyIntermediate.exported.status, 'PARTIAL');
+  assert.equal(emptyIntermediate.exported.issues.pagination.status, 'PARTIAL');
+  assert.ok(emptyIntermediate.exported.diagnostics.some((item) => item.code === 'PAGINATION_PAGE_SHORT_BEFORE_FINAL'));
+
+  const fixture = writeBrowserPayload(threeShort.exported);
+  try {
+    const imported = importSonarExport(fixture.repository, fixture.filePath);
+    assert.equal(imported.status, 'PARTIAL');
+    assert.ok(imported.diagnostics.some((item) => item.code === 'EXPORT_PAGE_SHORT_BEFORE_FINAL'));
+  } finally {
+    fs.rmSync(fixture.repository, { recursive: true, force: true });
+  }
+});
+
 test('browser exporter keeps API page size stable while bounding only stored issues', async () => {
   const exporter = loadExporter();
   const location = { origin: 'https://sonar.example.invalid', href: 'https://sonar.example.invalid/project/overview?id=demo-project' };

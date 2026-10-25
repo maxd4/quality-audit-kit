@@ -30,6 +30,11 @@ files plus the function count and parser versions. See
 [`maintainability.md`](maintainability.md) for the adapter limits and metric
 definitions.
 
+The trend comparator requires the supported `0.1-draft` run schema and
+coverage schema, a valid `inputScope`, a `MEASURED` maintainability engine,
+and a coherent coverage inventory on both sides. Missing coverage is not
+treated as complete coverage, even when function measurements are present.
+
 ## Finding contract
 
 Each finding has:
