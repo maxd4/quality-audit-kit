@@ -33,6 +33,70 @@ function engineFor(run) {
   return (run?.engines || []).find((engine) => engine?.name === ENGINE_NAME) || null;
 }
 
+function coverageContract(run, engine, measurements, label) {
+  const reasons = [];
+  const coverage = run?.maintainabilityCoverage;
+  const result = { valid: true, reasons };
+  if (!coverage || typeof coverage !== 'object' || Array.isArray(coverage)) {
+    reasons.push(`${label} has no maintainabilityCoverage inventory.`);
+    result.valid = false;
+    return result;
+  }
+  if (coverage.status !== 'MEASURED') reasons.push(`${label} maintainability coverage is ${coverage.status || 'UNKNOWN'}, not fully MEASURED.`);
+  const collections = ['eligibleFiles', 'measuredFiles', 'excludedFiles', 'unsupportedFiles', 'errorFiles', 'engines'];
+  for (const field of collections) if (!Array.isArray(coverage[field])) reasons.push(`${label} maintainability coverage has no valid ${field} collection.`);
+  if (!Number.isInteger(coverage.functionsMeasured) || coverage.functionsMeasured < 0) reasons.push(`${label} maintainability coverage has an invalid functionsMeasured count.`);
+
+  const eligibleFiles = Array.isArray(coverage.eligibleFiles) ? coverage.eligibleFiles : [];
+  const eligibleByPath = new Map();
+  for (const file of eligibleFiles) {
+    if (!file || typeof file !== 'object' || typeof file.path !== 'string' || !file.path) {
+      reasons.push(`${label} maintainability coverage contains an invalid eligible file.`);
+      continue;
+    }
+    if (eligibleByPath.has(file.path)) reasons.push(`${label} maintainability coverage contains duplicate eligible file ${file.path}.`);
+    eligibleByPath.set(file.path, file);
+    if (!['MEASURED', 'NOT_MEASURED', 'FAILURE'].includes(file.status)) reasons.push(`${label} maintainability coverage has an invalid status for ${file.path}.`);
+    if (!Number.isInteger(file.functionsMeasured) || file.functionsMeasured < 0) reasons.push(`${label} maintainability coverage has an invalid function count for ${file.path}.`);
+  }
+  const measuredFiles = Array.isArray(coverage.measuredFiles) ? coverage.measuredFiles : [];
+  const measuredPathSet = new Set();
+  for (const filePath of measuredFiles) {
+    if (typeof filePath !== 'string' || !filePath) reasons.push(`${label} maintainability coverage contains an invalid measured file path.`);
+    else if (measuredPathSet.has(filePath)) reasons.push(`${label} maintainability coverage contains duplicate measured file ${filePath}.`);
+    else measuredPathSet.add(filePath);
+    if (typeof filePath === 'string' && filePath && !eligibleByPath.has(filePath)) reasons.push(`${label} maintainability coverage measures an ineligible file ${filePath}.`);
+  }
+  if (coverage.status === 'MEASURED') {
+    if (!eligibleFiles.length) reasons.push(`${label} maintainability coverage has no eligible file inventory.`);
+    if (eligibleFiles.some((file) => file?.status !== 'MEASURED')) reasons.push(`${label} maintainability coverage has an eligible file that is not MEASURED.`);
+    if (measuredPathSet.size !== eligibleByPath.size || [...eligibleByPath.keys()].some((filePath) => !measuredPathSet.has(filePath))) reasons.push(`${label} maintainability coverage measuredFiles does not cover the complete eligible inventory.`);
+    if ((Array.isArray(coverage.errorFiles) && coverage.errorFiles.length) || (eligibleFiles.some((file) => file?.status === 'FAILURE')) || (Array.isArray(coverage.excludedFiles) && coverage.excludedFiles.some((file) => file?.status === 'FAILURE'))) reasons.push(`${label} maintainability coverage contains discovery or file failures.`);
+  }
+
+  const coverageEngines = Array.isArray(coverage.engines) ? coverage.engines : [];
+  const coverageEngine = coverageEngines.find((candidate) => candidate?.name === ENGINE_NAME);
+  if (!coverageEngine) reasons.push(`${label} maintainability coverage has no maintainability engine declaration.`);
+  else if (typeof coverageEngine.version !== 'string' || !coverageEngine.version) reasons.push(`${label} maintainability coverage has no maintainability engine version.`);
+  if (!engine || typeof engine.version !== 'string' || !engine.version) reasons.push(`${label} maintainability engine has no version.`);
+  if (coverageEngine?.version && engine?.version && coverageEngine.version !== engine.version) reasons.push(`${label} maintainability coverage engine version differs from the engine declaration.`);
+
+  const functionIds = new Set();
+  for (const measurement of measurements) {
+    if (measurement?.functionId) functionIds.add(measurement.functionId);
+    if (measurement?.path && (!eligibleByPath.has(measurement.path) || !measuredPathSet.has(measurement.path))) reasons.push(`${label} function measurements are outside the measured coverage inventory.`);
+    const file = eligibleByPath.get(measurement?.path);
+    if (file && file.status !== 'MEASURED') reasons.push(`${label} function measurements reference a file that is not MEASURED.`);
+  }
+  if (Number.isInteger(coverage.functionsMeasured) && coverage.functionsMeasured !== functionIds.size) reasons.push(`${label} maintainability coverage functionsMeasured does not match function measurements.`);
+  for (const [filePath, file] of eligibleByPath) {
+    const fileFunctions = new Set(measurements.filter((measurement) => measurement?.path === filePath).map((measurement) => measurement?.functionId).filter(Boolean));
+    if (Number.isInteger(file.functionsMeasured) && file.functionsMeasured !== fileFunctions.size) reasons.push(`${label} maintainability coverage function count does not match ${filePath}.`);
+  }
+  if (reasons.length) result.valid = false;
+  return result;
+}
+
 function contractFor(run, label) {
   const reasons = [];
   const checks = {};
@@ -43,17 +107,22 @@ function contractFor(run, label) {
   if (!engine) reasons.push(`${label} has no ${ENGINE_NAME} engine.`);
   if (!Array.isArray(run?.functionMeasurements)) reasons.push(`${label} has no functionMeasurements array; function trends are NOT_MEASURED.`);
   if (engine && engine.measurementStatus !== 'MEASURED') reasons.push(`${label} maintainability engine is ${engine.measurementStatus || 'UNKNOWN'}, not MEASURED.`);
-  if (run?.maintainabilityCoverage && run.maintainabilityCoverage.status !== 'MEASURED') reasons.push(`${label} maintainability coverage is ${run.maintainabilityCoverage.status}, not fully MEASURED.`);
 
   const engineRevision = revisionOf(engine?.sourceRevision);
   if (engine && (engineRevision.status !== 'VERIFIED' || !engineRevision.sha)) reasons.push(`${label} maintainability engine lacks a VERIFIED source revision.`);
+  if (typeof run?.inputScope !== 'string' || !run.inputScope) reasons.push(`${label} has no inputScope; measured scope is not demonstrated.`);
   const measurements = Array.isArray(run?.functionMeasurements) ? run.functionMeasurements : [];
+  const coverage = coverageContract(run, engine, measurements, label);
+  reasons.push(...coverage.reasons);
   const engineVersions = sortedUnique(measurements.map((measurement) => measurement?.engineVersion));
   const metricVersions = sortedUnique(measurements.map((measurement) => measurement?.metricVersion));
   if (engineVersions.length > 1) reasons.push(`${label} contains multiple maintainability engine versions.`);
+  if (engineVersions.length && (!engine?.version || engineVersions.some((version) => version !== engine.version))) reasons.push(`${label} function measurement engine versions do not match the engine declaration.`);
   for (const measurement of measurements) {
     const source = evidenceRevision(measurement);
     if (measurement?.engine !== ENGINE_NAME) reasons.push(`${label} contains a function measurement from an unknown engine.`);
+    if (typeof measurement?.engineVersion !== 'string' || !measurement.engineVersion) reasons.push(`${label} contains a function measurement without an engine version.`);
+    if (typeof measurement?.metricVersion !== 'string' || !measurement.metricVersion) reasons.push(`${label} contains a function measurement without a versioned metric definition.`);
     if (measurement?.status !== 'MEASURED') reasons.push(`${label} contains a function measurement that is not MEASURED.`);
     if (source.status !== 'VERIFIED' || !source.sha) reasons.push(`${label} contains a function measurement without a VERIFIED source revision.`);
     if (engineRevision.sha && source.sha && engineRevision.sha !== source.sha) reasons.push(`${label} contains a function measurement attributed to a different source revision.`);
@@ -63,9 +132,10 @@ function contractFor(run, label) {
   checks.runId = Boolean(run?.runId);
   checks.sourceRevision = Boolean(engineRevision.status === 'VERIFIED' && engineRevision.sha);
   checks.measurements = Array.isArray(run?.functionMeasurements) && engine?.measurementStatus === 'MEASURED';
-  checks.scope = Boolean(run?.inputScope);
-  checks.engine = engineVersions.length <= 1;
-  checks.metricDefinitions = metricVersions.length > 0;
+  checks.coverage = coverage.valid;
+  checks.scope = typeof run?.inputScope === 'string' && run.inputScope.length > 0;
+  checks.engine = Boolean(engine && typeof engine.version === 'string' && engine.version && engineVersions.every((version) => version === engine.version));
+  checks.metricDefinitions = measurements.every((measurement) => typeof measurement?.metricVersion === 'string' && measurement.metricVersion.length > 0);
   return {
     label,
     runId: run?.runId || null,

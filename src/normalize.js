@@ -34,6 +34,12 @@ function jscpdMetricIdentity({ pairKey, fragment, lines, percentage, tokens, cha
   return crypto.createHash('sha256').update(JSON.stringify({ pairKey, fragment, lines, percentage, tokens, chars })).digest('hex');
 }
 
+function jscpdNativeFingerprint(duplicate) {
+  return ['fingerprint', 'cloneId', 'nativeId', 'id']
+    .map((key) => duplicate?.[key])
+    .find((value) => value !== undefined && value !== null && String(value).trim() !== '');
+}
+
 function severity(value, fallback = 'INFO') {
   const normalized = String(value || '').toUpperCase();
   if (SEVERITIES.includes(normalized)) return normalized;
@@ -236,6 +242,13 @@ function normalizeJscpd(root, report, provenance) {
   const diagnostics = [];
   const findings = [];
   const findingIds = new Set();
+  const nativeFingerprintCounts = new Map();
+  for (const duplicate of duplicates) {
+    const fingerprint = jscpdNativeFingerprint(duplicate);
+    if (fingerprint === undefined) continue;
+    const key = String(fingerprint);
+    nativeFingerprintCounts.set(key, (nativeFingerprintCounts.get(key) || 0) + 1);
+  }
   for (const [index, duplicate] of duplicates.entries()) {
     const first = duplicate?.firstFile || duplicate?.first || {};
     const second = duplicate?.secondFile || duplicate?.second || {};
@@ -278,7 +291,7 @@ function normalizeJscpd(root, report, provenance) {
       : percentage !== null && percentage >= 10 || severityLines >= 20
         ? 'MEDIUM'
         : 'LOW';
-    const nativeFingerprint = ['fingerprint', 'cloneId', 'nativeId', 'id'].map((key) => duplicate?.[key]).find((value) => value !== undefined && value !== null && String(value).trim() !== '');
+    const nativeFingerprint = jscpdNativeFingerprint(duplicate);
     const occurrences = [
       { side: 'first', path: firstRelative, startLine: firstRange.startLine, endLine: firstRange.endLine },
       { side: 'second', path: secondRelative, startLine: secondRange.startLine, endLine: secondRange.endLine },
@@ -287,6 +300,9 @@ function normalizeJscpd(root, report, provenance) {
     const stableCloneKey = nativeFingerprint
       ? `native:${String(nativeFingerprint)}`
       : `derived:qak:${jscpdMetricIdentity({ pairKey, fragment, lines, percentage, tokens, chars })}`;
+    const historicalKey = nativeFingerprint && nativeFingerprintCounts.get(String(nativeFingerprint)) === 1
+      ? `native:${String(nativeFingerprint)}`
+      : null;
     const derivedKey = jscpdMetricIdentity({ pairKey, fragment, lines, percentage, tokens, chars });
     const canonicalOccurrence = [...occurrences].sort((left, right) => jscpdOccurrenceKey(left).localeCompare(jscpdOccurrenceKey(right)))[0];
     const finding = createFinding({
@@ -297,7 +313,11 @@ function normalizeJscpd(root, report, provenance) {
       line: canonicalOccurrence.startLine || undefined,
       severityValue: derivedSeverity,
       message: `Duplicated code with ${secondRelative}${percentage !== null ? ` (${percentage}% similarity)` : ''}`,
-      locus: `${stableCloneKey}|pair:${pairKey}`,
+      // A native fingerprint is a stable historical candidate only when it is
+      // unique in this report. Duplicate native fingerprints keep their pair
+      // discriminator so distinct physical clones remain unique, while the
+      // history matcher can refuse an ambiguous re-association.
+      locus: historicalKey || `${stableCloneKey}|pair:${pairKey}`,
       provenance,
       rawReference: reference,
     });
@@ -317,6 +337,8 @@ function normalizeJscpd(root, report, provenance) {
         occurrence: occurrences.map(jscpdOccurrenceKey),
         pair: pairKey,
         family: nativeFingerprint ? `native:${String(nativeFingerprint)}` : `derived:qak:${derivedKey}`,
+        historical: historicalKey,
+        historicalMatchable: Boolean(historicalKey),
       },
       occurrences,
       metrics: { lines, percentage, tokens, chars, fragment },

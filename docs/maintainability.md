@@ -18,6 +18,11 @@ tokenized, delimiters are balanced, and files with an unmatched delimiter or
 unterminated literal are recorded as `FAILURE`; they do not yield zero-valued
 measurements. This is a lightweight structural adapter, not a claim of
 equivalence with Babel, TypeScript or CodeScene.
+TypeScript arrow signatures used only as type aliases, interface members or
+annotations are excluded from executable-function measurements; executable
+arrows, including annotated arrows and nested callbacks, retain their inferred
+identities. Syntax that cannot be classified reliably remains subject to this
+lightweight adapter's conservative limits.
 
 For every measured function, the run contains separate records in
 `functionMeasurements`:
@@ -97,8 +102,15 @@ quality-audit-kit report current-run.json --previous-run previous-run.json --for
 ```
 
 The comparison requires compatible repository identity, distinct run IDs,
-compatible input scope, a measured maintainability engine, verified source
-revisions attributed to both runs, and matching engine/metric definitions.
+an explicit compatible input scope, a complete `MEASURED`
+`maintainabilityCoverage` inventory whose files and function counters agree
+with the measurements, a measured maintainability engine, verified source
+revisions attributed to both runs, coherent engine versions, and a versioned
+definition for every metric being compared. Missing or contradictory coverage,
+scope, engine versions or metric definitions make the runs
+`NOT_COMPARABLE`; this also applies when both sides omit the same metric
+version. A complete measured inventory may still legitimately contain zero
+functions.
 Function IDs are preferred; a unique path/name/AST-role/language signature is
 the only fallback. Renames, ambiguous moves, collisions, incomplete runs and
 unverified or unknown provenance remain qualified as `NOT_COMPARABLE`. Added

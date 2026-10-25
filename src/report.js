@@ -127,6 +127,7 @@ function buildRecommendations(run, buckets, failures) {
   if (buckets.new.length || buckets.reintroduced.length) recommendations.push('Triage new or reintroduced findings with an explicit decision and evidence.');
   if (buckets.historicalActionable.length) recommendations.push('Review historical actionable findings and record their next action.');
   if ((run.comparison?.staleDecisions || []).some((decision) => decision.status === 'STALE')) recommendations.push('Review stale decisions before relying on historical justifications.');
+  if (run.comparison?.diagnostics?.length) recommendations.push('Review ambiguous historical clone matches before relying on NEW or RESOLVED conclusions.');
   if (failures.length) recommendations.push('Resolve failed, skipped or unmeasured scanners before treating this audit as complete.');
   if (!recommendations.length) recommendations.push('No additional recommendation was derived from the recorded evidence.');
   return recommendations;
@@ -276,7 +277,14 @@ function renderMarkdown(run, options = {}) {
     for (const item of report.structuralComplexity) lines.push(`- ${cell(item.path)}:${item.startLine}-${item.endLine}: ${cell(item.explanation)}`);
     lines.push('');
   }
-  if (safeRun.comparison) lines.push('## Historical comparison', '', `- Status: \`${cell(safeRun.comparison.status)}\``, `- Baseline run: \`${cell(safeRun.comparison.baselineRunId || 'UNKNOWN')}\``, `- Resolved: ${report.findings.resolved.length}`, '');
+  if (safeRun.comparison) {
+    lines.push('## Historical comparison', '', `- Status: \`${cell(safeRun.comparison.status)}\``, `- Baseline run: \`${cell(safeRun.comparison.baselineRunId || 'UNKNOWN')}\``, `- Resolved: ${report.findings.resolved.length}`, '');
+    if (safeRun.comparison.diagnostics?.length) {
+      lines.push('### Historical comparison diagnostics', '');
+      for (const diagnostic of safeRun.comparison.diagnostics) lines.push(`- **${cell(diagnostic.code || 'COMPARISON_DIAGNOSTIC')}**: ${cell(diagnostic.message)}`);
+      lines.push('');
+    }
+  }
   if (report.maintainabilityTrends) lines.push(...renderMaintainabilityTrendsMarkdown(report.maintainabilityTrends, { title: '## Maintainability trends' }).trimEnd().split('\n'), '');
   lines.push('## Findings', '');
   lines.push(...findingTable('New', report.findings.new));

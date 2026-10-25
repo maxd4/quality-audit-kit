@@ -98,21 +98,110 @@ function comparisonKey(finding) {
   return [finding?.engine || '', finding?.ruleId || '', message].join('|');
 }
 
+function nativeFingerprintForClone(finding) {
+  if (finding?.engine !== 'jscpd') return null;
+  const value = finding.clone?.nativeFingerprint?.value
+    ?? (finding?.clone?.grouping?.source === 'NATIVE_FINGERPRINT' ? finding.clone?.grouping?.key : null);
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  return String(value);
+}
+
+function cloneHistoryAssessment(finding) {
+  const nativeFingerprint = nativeFingerprintForClone(finding);
+  if (!nativeFingerprint) return { eligible: false, nativeFingerprint: null, reason: null };
+  const cloneData = finding.clone;
+  const occurrences = Array.isArray(cloneData.occurrences) ? cloneData.occurrences : [];
+  if (occurrences.length < 2) return { eligible: false, nativeFingerprint, reason: 'CLONE_HISTORY_RANGES_INCOMPLETE' };
+  if (occurrences.some((occurrence) => (
+    typeof occurrence?.path !== 'string'
+    || !occurrence.path
+    || !Number.isInteger(occurrence.startLine)
+    || !Number.isInteger(occurrence.endLine)
+    || occurrence.startLine < 1
+    || occurrence.endLine < occurrence.startLine
+  ))) {
+    return { eligible: false, nativeFingerprint, reason: 'CLONE_HISTORY_RANGES_INCOMPLETE' };
+  }
+  const scope = cloneData.scope;
+  if (!['INTRA_FILE', 'INTER_FILE'].includes(scope)) return { eligible: false, nativeFingerprint, reason: 'CLONE_HISTORY_SCOPE_UNAVAILABLE' };
+  const metrics = cloneData.metrics || {};
+  const metricIdentity = {
+    lines: metrics.lines ?? null,
+    percentage: metrics.percentage ?? null,
+    tokens: metrics.tokens ?? null,
+    chars: metrics.chars ?? null,
+    fragment: metrics.fragment ?? null,
+  };
+  if (!Object.values(metricIdentity).some((value) => value !== null && value !== undefined && value !== '')) {
+    return { eligible: false, nativeFingerprint, reason: 'CLONE_HISTORY_CHARACTERISTICS_UNAVAILABLE' };
+  }
+  const files = [...new Set(occurrences.map((occurrence) => occurrence.path))].sort();
+  const key = JSON.stringify({
+    engine: 'jscpd',
+    nativeFingerprint,
+    scope,
+    files,
+    metricIdentity,
+  });
+  return { eligible: true, nativeFingerprint, key, reason: null };
+}
+
+function cloneHistoricalKey(finding) {
+  return cloneHistoryAssessment(finding).key || null;
+}
+
 function indexFindings(findings) {
   const byId = new Map();
   const byKey = new Map();
+  const byCloneHistory = new Map();
+  const byCloneNative = new Map();
   for (const finding of findings || []) {
     byId.set(finding.id, finding);
     const key = comparisonKey(finding);
     if (!byKey.has(key)) byKey.set(key, []);
     byKey.get(key).push(finding);
+    const assessment = cloneHistoryAssessment(finding);
+    if (assessment.nativeFingerprint) {
+      if (!byCloneNative.has(assessment.nativeFingerprint)) byCloneNative.set(assessment.nativeFingerprint, []);
+      byCloneNative.get(assessment.nativeFingerprint).push(finding);
+    }
+    if (assessment.key) {
+      if (!byCloneHistory.has(assessment.key)) byCloneHistory.set(assessment.key, []);
+      byCloneHistory.get(assessment.key).push(finding);
+    }
   }
-  return { byId, byKey };
+  return { byId, byKey, byCloneHistory, byCloneNative };
 }
 
 function matchFinding(finding, index, usedIds = new Set()) {
   const exact = index.byId.get(finding.id);
   if (exact && !usedIds.has(exact.id)) return { finding: exact, matchedBy: 'ID' };
+  if (finding?.engine === 'jscpd') {
+    const assessment = cloneHistoryAssessment(finding);
+    if (assessment.nativeFingerprint) {
+      const nativeCandidates = index.byCloneNative.get(assessment.nativeFingerprint) || [];
+      if (!assessment.eligible) {
+        if (nativeCandidates.length) {
+          return { ambiguous: true, reason: assessment.reason, candidateIds: nativeCandidates.map((candidate) => candidate.id) };
+        }
+        return null;
+      }
+      const allCandidates = index.byCloneHistory.get(assessment.key) || [];
+      const candidates = allCandidates.filter((candidate) => !usedIds.has(candidate.id));
+      if (candidates.length === 1) return { finding: candidates[0], matchedBy: 'NATIVE_FINGERPRINT' };
+      if (allCandidates.length || nativeCandidates.length) {
+        return {
+          ambiguous: true,
+          reason: allCandidates.length > 1 ? 'CLONE_HISTORY_NATIVE_FINGERPRINT_AMBIGUOUS' : 'CLONE_HISTORY_CONTEXT_MISMATCH',
+          candidateIds: [...new Set((allCandidates.length ? allCandidates : nativeCandidates).map((candidate) => candidate.id))],
+        };
+      }
+      return null;
+    }
+    // jscpd findings without a native fingerprint do not have a safe
+    // line-independent key; never fall back to the generic message key.
+    return null;
+  }
   const candidates = (index.byKey.get(comparisonKey(finding)) || []).filter((candidate) => !usedIds.has(candidate.id));
   if (candidates.length === 1) return { finding: candidates[0], matchedBy: 'COMPARISON_KEY' };
   return null;
@@ -146,19 +235,24 @@ function evaluateDecisionStaleness(decisionsBundle, currentRun, baselineRun, com
   for (const decision of latest.values()) {
     const currentFinding = (currentRun?.findings || []).find((finding) => finding.id === decision.findingId);
     const baselineFinding = (baselineRun?.findings || []).find((finding) => finding.id === decision.findingId);
+    const moved = comparisonResult?.matches?.find((match) => match.baselineFindingId === decision.findingId && match.matchedBy !== 'ID');
+    const matchedCurrentFinding = moved
+      ? (currentRun?.findings || []).find((finding) => finding.id === moved.currentFindingId)
+      : null;
+    const effectiveCurrentFinding = currentFinding || matchedCurrentFinding;
     const historicalFinding = historical.some((entry) => entry.findings.some((finding) => finding.id === decision.findingId));
     const reasons = [];
-    const completed = !currentFinding && (decision.decision === 'FIX' || decision.decision === 'FALSE_POSITIVE') && (baselineFinding || historicalFinding);
+    const completed = !effectiveCurrentFinding && (decision.decision === 'FIX' || decision.decision === 'FALSE_POSITIVE') && (baselineFinding || historicalFinding);
     if (decision.reviewAfter && String(decision.reviewAfter) <= today && !completed) reasons.push('reviewAfter has elapsed.');
-    if (!currentFinding && !baselineFinding && !historicalFinding) reasons.push('finding is absent from the known audit history.');
-    if (baselineFinding && !currentFinding && (decision.decision === 'KEEP_JUSTIFIED' || decision.decision === 'DEFER')) {
+    if (!effectiveCurrentFinding && !baselineFinding && !historicalFinding) reasons.push('finding is absent from the known audit history.');
+    if (baselineFinding && !effectiveCurrentFinding && (decision.decision === 'KEEP_JUSTIFIED' || decision.decision === 'DEFER')) {
       reasons.push('the justified/actionable finding is absent from the current complete measurement.');
     }
-    const moved = comparisonResult?.matches?.find((match) => match.baselineFindingId === decision.findingId && match.matchedBy !== 'ID');
-    if (moved) reasons.push('the finding matched only after its identity or file scope changed.');
+    if (moved && moved.matchedBy !== 'NATIVE_FINGERPRINT') reasons.push('the finding matched only after its identity or file scope changed.');
     const status = reasons.length ? 'STALE' : completed ? 'SATISFIED' : 'ACTIVE';
     result.push({
       findingId: decision.findingId,
+      ...(matchedCurrentFinding ? { matchedFindingId: matchedCurrentFinding.id } : {}),
       decision: decision.decision,
       status,
       reasons,
@@ -245,6 +339,7 @@ function compareRuns(baselineRun, currentRun, decisionsBundle = {}, policy = {},
       currentRunId: currentRun?.runId || null,
       matches: [],
       resolved: [],
+      diagnostics: [],
       staleDecisions: [],
       qualityGate,
     };
@@ -254,10 +349,18 @@ function compareRuns(baselineRun, currentRun, decisionsBundle = {}, policy = {},
   const historyIndex = indexFindings(historyEntries(baselineRun).flatMap((entry) => entry.findings));
   const decisions = latestDecisions(decisionsBundle);
   const usedBaselineIds = new Set();
+  const protectedBaselineIds = new Set();
   const matches = [];
+  const diagnostics = [];
   const classifiedFindings = [];
   for (const finding of currentRun.findings) {
     const baselineMatch = matchFinding(finding, baselineIndex, usedBaselineIds);
+    if (baselineMatch?.ambiguous) {
+      for (const candidateId of baselineMatch.candidateIds || []) protectedBaselineIds.add(candidateId);
+      diagnostics.push({ code: baselineMatch.reason, findingId: finding.id, candidateFindingIds: [...(baselineMatch.candidateIds || [])].sort(), message: 'Historical clone continuity was not inferred because the native evidence was ambiguous or incomplete.' });
+      classifiedFindings.push({ ...finding, lifecycle: 'UNCLASSIFIED' });
+      continue;
+    }
     if (baselineMatch) {
       usedBaselineIds.add(baselineMatch.finding.id);
       const decision = decisions.get(baselineMatch.finding.id) || decisions.get(finding.id);
@@ -269,12 +372,20 @@ function compareRuns(baselineRun, currentRun, decisionsBundle = {}, policy = {},
       continue;
     }
     const historicalMatch = matchFinding(finding, historyIndex, new Set([...usedBaselineIds]));
+    if (historicalMatch?.ambiguous) {
+      for (const candidateId of historicalMatch.candidateIds || []) {
+        if (baselineIndex.byId.has(candidateId)) protectedBaselineIds.add(candidateId);
+      }
+      diagnostics.push({ code: historicalMatch.reason, findingId: finding.id, candidateFindingIds: [...(historicalMatch.candidateIds || [])].sort(), message: 'Historical clone continuity was not inferred from an ambiguous or incomplete prior occurrence.' });
+      classifiedFindings.push({ ...finding, lifecycle: 'UNCLASSIFIED' });
+      continue;
+    }
     const lifecycle = historicalMatch ? 'REINTRODUCED' : 'NEW';
     classifiedFindings.push({ ...finding, lifecycle });
     if (historicalMatch) matches.push({ currentFindingId: finding.id, historicalFindingId: historicalMatch.finding.id, matchedBy: historicalMatch.matchedBy, lifecycle });
   }
   const resolved = baselineRun.findings
-    .filter((finding) => !usedBaselineIds.has(finding.id))
+    .filter((finding) => !usedBaselineIds.has(finding.id) && !protectedBaselineIds.has(finding.id))
     .map((finding) => ({ findingId: finding.id, lifecycle: 'RESOLVED', finding: clone(finding) }));
   const comparison = {
     status: 'COMPATIBLE',
@@ -284,6 +395,7 @@ function compareRuns(baselineRun, currentRun, decisionsBundle = {}, policy = {},
     matches,
     resolved,
     reasons: [],
+    diagnostics,
   };
   const staleDecisions = evaluateDecisionStaleness(decisionsBundle, { ...currentRun, findings: classifiedFindings }, baselineRun, comparison, options.today);
   const staleIds = new Set(staleDecisions.filter((decision) => decision.status === 'STALE').map((decision) => decision.findingId));
@@ -342,6 +454,7 @@ module.exports = {
   comparisonKey,
   createBaseline,
   evaluateDecisionStaleness,
+  cloneHistoricalKey,
   normalizePolicy,
   policyRelaxations,
 };

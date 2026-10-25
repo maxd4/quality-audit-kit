@@ -6,7 +6,7 @@ const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const { buildCloneAudit, renderCloneMarkdown } = require('../src/clone-triage');
-const { assessMeasuredRun } = require('../src/history');
+const { assessMeasuredRun, compareRuns } = require('../src/history');
 const { normalizeJscpd } = require('../src/normalize');
 const { buildStructuredReport, renderMarkdown } = require('../src/report');
 
@@ -51,6 +51,15 @@ function fixtureFinding(id, firstPath, firstStart, firstEnd, secondPath, secondS
       dataAvailability: 'COMPLETE',
     },
   };
+}
+
+function verifiedCloneRun(findings, runId) {
+  const revision = { status: 'VERIFIED', sha: 'c'.repeat(40), basis: 'fixture' };
+  const run = runWithFindings(JSON.parse(JSON.stringify(findings)));
+  run.runId = runId;
+  run.engines[0].sourceRevision = revision;
+  for (const finding of run.findings) finding.provenance.sourceRevision = revision;
+  return run;
 }
 
 test('normalisation preserves exact clone ranges, provenance and native fingerprint', () => {
@@ -111,6 +120,96 @@ test('normalized clone findings remain eligible for historical comparison withou
   const assessment = assessMeasuredRun({ schemaVersion: '0.1-draft', repository: { name: 'fixture' }, engines: [{ name: 'jscpd', measurementStatus: 'MEASURED', sourceRevision: provenance.sourceRevision }], findings }, 'run');
   assert.equal(assessment.reasons.some((reason) => reason.includes('duplicate finding ID')), false);
   assert.equal(assessment.eligible, true);
+});
+
+test('native fingerprints preserve unique clone history after a line shift and keep decisions attached to the same clone', () => {
+  const provenance = { kind: 'REPORT', reference: 'fixture', sourceRevision: { status: 'VERIFIED', sha: 'c'.repeat(40), basis: 'fixture' } };
+  const initial = {
+    duplicates: [
+      { fingerprint: 'fp-1', lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 10, end: 14 }, secondFile: { name: 'src/b.js', start: 30, end: 34 } },
+      { fingerprint: 'fp-2', lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 50, end: 54 }, secondFile: { name: 'src/b.js', start: 70, end: 74 } },
+    ],
+  };
+  const shifted = {
+    duplicates: [
+      { fingerprint: 'fp-2', lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 60, end: 64 }, secondFile: { name: 'src/b.js', start: 80, end: 84 } },
+      { fingerprint: 'fp-1', lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 20, end: 24 }, secondFile: { name: 'src/b.js', start: 40, end: 44 } },
+    ],
+  };
+  const baselineFindings = normalizeJscpd('C:/repo', initial, provenance);
+  const currentFindings = normalizeJscpd('C:/repo', shifted, provenance);
+  const baselineIds = new Map(baselineFindings.map((finding) => [finding.clone.nativeFingerprint.value, finding.id]));
+  const currentIds = new Map(currentFindings.map((finding) => [finding.clone.nativeFingerprint.value, finding.id]));
+  assert.deepEqual(currentIds, baselineIds);
+  assert.equal(new Set(currentFindings.map((finding) => finding.id)).size, 2);
+
+  // Exercise the historical key even for legacy IDs that included pair ranges.
+  for (const finding of baselineFindings) finding.id = `legacy-baseline-${finding.clone.nativeFingerprint.value}`;
+  for (const finding of currentFindings) finding.id = `legacy-current-${finding.clone.nativeFingerprint.value}`;
+  const baseline = verifiedCloneRun(baselineFindings, 'clone-history-before');
+  const current = verifiedCloneRun(currentFindings, 'clone-history-after');
+  const result = compareRuns(baseline, current, {
+    decisions: [{
+      findingId: 'legacy-baseline-fp-1',
+      decision: 'KEEP_JUSTIFIED',
+      reason: 'Compatibility clone retained by contract.',
+      reviewer: 'human',
+      reviewedRevision: 'c'.repeat(40),
+      evidence: [{ type: 'TEST', reference: 'fixture' }],
+    }],
+  });
+  assert.equal(result.compatible, true);
+  assert.equal(result.resolved.length, 0);
+  assert.equal(result.diagnostics.length, 0);
+  assert.deepEqual(new Set(result.matches.map((match) => match.matchedBy)), new Set(['NATIVE_FINGERPRINT']));
+  assert.equal(result.classifiedFindings.find((finding) => finding.clone.nativeFingerprint.value === 'fp-1').lifecycle, 'HISTORICAL_JUSTIFIED');
+  assert.equal(result.classifiedFindings.find((finding) => finding.clone.nativeFingerprint.value === 'fp-2').lifecycle, 'HISTORICAL_ACTIONABLE');
+  const decision = result.staleDecisions.find((item) => item.findingId === 'legacy-baseline-fp-1');
+  assert.equal(decision.status, 'ACTIVE');
+  assert.equal(decision.matchedFindingId, 'legacy-current-fp-1');
+});
+
+test('duplicate native fingerprints never receive an order-based historical match', () => {
+  const report = {
+    duplicates: [
+      { fingerprint: 'shared-fp', lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 1, end: 5 }, secondFile: { name: 'src/b.js', start: 20, end: 24 } },
+      { fingerprint: 'shared-fp', lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 10, end: 14 }, secondFile: { name: 'src/b.js', start: 30, end: 34 } },
+    ],
+  };
+  const provenance = { kind: 'REPORT', reference: 'fixture', sourceRevision: { status: 'VERIFIED', sha: 'd'.repeat(40), basis: 'fixture' } };
+  const baselineFindings = normalizeJscpd('C:/repo', report, provenance);
+  const currentFindings = normalizeJscpd('C:/repo', { duplicates: [...report.duplicates].reverse() }, provenance);
+  assert.equal(baselineFindings.length, 2);
+  assert.equal(new Set(baselineFindings.map((finding) => finding.id)).size, 2);
+  for (const [index, finding] of baselineFindings.entries()) finding.id = `ambiguous-baseline-${index}`;
+  for (const [index, finding] of currentFindings.entries()) finding.id = `ambiguous-current-${index}`;
+  const result = compareRuns(verifiedCloneRun(baselineFindings, 'ambiguous-before'), verifiedCloneRun(currentFindings, 'ambiguous-after'));
+  assert.equal(result.matches.length, 0);
+  assert.equal(result.resolved.length, 0);
+  assert.equal(result.classifiedFindings.every((finding) => finding.lifecycle === 'UNCLASSIFIED'), true);
+  assert.equal(result.diagnostics.every((diagnostic) => diagnostic.code === 'CLONE_HISTORY_NATIVE_FINGERPRINT_AMBIGUOUS'), true);
+  const reportRun = verifiedCloneRun(currentFindings, 'ambiguous-after');
+  reportRun.findings = result.classifiedFindings;
+  const { classifiedFindings, qualityGate, ...serializableComparison } = result;
+  reportRun.comparison = serializableComparison;
+  reportRun.qualityGate = qualityGate;
+  const structured = buildStructuredReport(reportRun);
+  assert.equal(structured.comparison.diagnostics.length, 2);
+  assert.match(renderMarkdown(reportRun), /CLONE_HISTORY_NATIVE_FINGERPRINT_AMBIGUOUS/);
+});
+
+test('incomplete native ranges remain non-comparable instead of becoming a false NEW or RESOLVED pair', () => {
+  const report = { duplicates: [{ fingerprint: 'incomplete-fp', lines: 5, tokens: 20, firstFile: { name: 'src/a.js', start: 0, end: 4 }, secondFile: { name: 'src/b.js', start: 20, end: 24 } }] };
+  const provenance = { kind: 'REPORT', reference: 'fixture', sourceRevision: { status: 'VERIFIED', sha: 'e'.repeat(40), basis: 'fixture' } };
+  const baselineFindings = normalizeJscpd('C:/repo', report, provenance);
+  const currentFindings = normalizeJscpd('C:/repo', report, provenance);
+  baselineFindings[0].id = 'incomplete-baseline';
+  currentFindings[0].id = 'incomplete-current';
+  const result = compareRuns(verifiedCloneRun(baselineFindings, 'incomplete-before'), verifiedCloneRun(currentFindings, 'incomplete-after'));
+  assert.equal(result.matches.length, 0);
+  assert.equal(result.resolved.length, 0);
+  assert.equal(result.classifiedFindings[0].lifecycle, 'UNCLASSIFIED');
+  assert.equal(result.diagnostics[0].code, 'CLONE_HISTORY_RANGES_INCOMPLETE');
 });
 
 test('normalisation reports incomplete clone paths, ranges and metrics without fabricating them', () => {

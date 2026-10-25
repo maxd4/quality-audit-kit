@@ -391,6 +391,80 @@ function classifyCallback(tokens, index, parameterStart = index) {
   return null;
 }
 
+function isTypeOnlyArrow(tokens, arrowIndex, parameterStart, pairs) {
+  const beforeParameter = tokens[parameterStart - 1]?.value;
+  let cursor = parameterStart - 1;
+  while (cursor >= 0) {
+    const value = tokens[cursor].value;
+    if (value === ';' || ['const', 'let', 'var', 'function', 'class', 'return'].includes(value)) {
+      if (value === 'const' || value === 'let' || value === 'var') {
+        if (tokens[cursor - 1]?.value === 'declare') return true;
+      }
+      break;
+    }
+    if (value === 'type'
+      && tokens[cursor + 1]?.type === 'identifier'
+      && (cursor === 0 || [';', '{', '}', 'export', 'declare'].includes(tokens[cursor - 1]?.value))) return true;
+    cursor -= 1;
+  }
+
+  for (let index = 0; index < parameterStart; index += 1) {
+    if (tokens[index].value !== 'interface' || tokens[index + 1]?.type !== 'identifier') continue;
+    const bodyStart = tokens.slice(index + 2, parameterStart).findIndex((item) => item.value === '{');
+    if (bodyStart < 0) continue;
+    const absoluteBodyStart = index + 2 + bodyStart;
+    const bodyEnd = pairs.get(absoluteBodyStart);
+    if (bodyEnd !== undefined && arrowIndex < bodyEnd) return true;
+  }
+
+  if (beforeParameter !== ':') return false;
+  cursor = parameterStart - 2;
+  while (cursor >= 0 && ![';', '{', '}'].includes(tokens[cursor].value)) {
+    if (['const', 'let', 'var'].includes(tokens[cursor].value)) return true;
+    cursor -= 1;
+  }
+
+  let nestedParentheses = 0;
+  for (cursor = parameterStart - 1; cursor >= 0; cursor -= 1) {
+    const value = tokens[cursor].value;
+    if (value === ')') nestedParentheses += 1;
+    else if (value === '(') {
+      if (nestedParentheses > 0) { nestedParentheses -= 1; continue; }
+      const enclosingEnd = pairs.get(cursor);
+      const afterEnclosing = enclosingEnd === undefined ? undefined : tokens[enclosingEnd + 1]?.value;
+      if (enclosingEnd !== undefined && enclosingEnd > arrowIndex && ['=>', '{'].includes(afterEnclosing)) return true;
+      break;
+    }
+  }
+  return false;
+}
+
+function arrowParameterBounds(tokens, arrowIndex, pairs) {
+  const previous = tokens[arrowIndex - 1];
+  if (previous?.value === ')') return { start: pairs.get(arrowIndex - 1), end: arrowIndex - 1 };
+  if (previous?.type !== 'identifier') return null;
+
+  for (let cursor = arrowIndex - 2; cursor >= 0; cursor -= 1) {
+    if (tokens[cursor].value === ';') break;
+    if (tokens[cursor].value !== ')') continue;
+    const parameterStart = pairs.get(cursor);
+    if (parameterStart === undefined || tokens[cursor + 1]?.value !== ':') break;
+    return { start: parameterStart, end: cursor };
+  }
+  return { start: arrowIndex - 1, end: arrowIndex - 1 };
+}
+
+function arrowAssignedName(tokens, parameterStart, beforeParameter) {
+  if (beforeParameter !== '=') return beforeParameter === ':' ? tokens[parameterStart - 2]?.value : null;
+  for (let cursor = parameterStart - 2; cursor >= 0; cursor -= 1) {
+    if ([';', '{', '}'].includes(tokens[cursor].value)) break;
+    if (['const', 'let', 'var'].includes(tokens[cursor].value)) {
+      return tokens[cursor + 1]?.type === 'identifier' ? tokens[cursor + 1].value : null;
+    }
+  }
+  return tokens[parameterStart - 2]?.value;
+}
+
 function extractFunctions(tokens, pairs) {
   const functions = []; const seen = new Set();
   const addFunction = (item) => {
@@ -416,17 +490,16 @@ function extractFunctions(tokens, pairs) {
       addFunction({ startToken: index, endToken: bodyEnd, bodyStart, bodyEnd, name, role: classifyCallback(tokens, index) || (name === 'anonymous' ? 'FUNCTION_EXPRESSION' : 'FUNCTION_DECLARATION') });
     }
     if (tokens[index].value === '=>') {
-      const previous = tokens[index - 1];
-      let parameterStart = index - 1; let parameterEnd = index - 1;
-      if (previous?.value === ')') { parameterStart = pairs.get(index - 1); parameterEnd = index - 1; }
-      else if (previous?.type !== 'identifier') continue;
-      if (parameterStart === undefined || parameterStart < 0) continue;
+      const bounds = arrowParameterBounds(tokens, index, pairs);
+      if (!bounds || bounds.start === undefined || bounds.start < 0) continue;
+      const { start: parameterStart } = bounds;
+      if (isTypeOnlyArrow(tokens, index, parameterStart, pairs)) continue;
       let bodyStart = index + 1; let bodyEnd;
       if (tokens[bodyStart]?.value === '{') bodyEnd = pairs.get(bodyStart);
       else bodyEnd = findExpressionEnd(tokens, bodyStart, pairs);
       if (bodyEnd === undefined || bodyEnd < bodyStart) continue;
       const beforeParameter = tokens[parameterStart - 1]?.value;
-      const assignedName = beforeParameter === '=' ? tokens[parameterStart - 2]?.value : beforeParameter === ':' ? tokens[parameterStart - 2]?.value : null;
+      const assignedName = arrowAssignedName(tokens, parameterStart, beforeParameter);
       const name = assignedName && /^[A-Za-z_$]/.test(assignedName) ? assignedName : 'anonymous';
       const role = classifyCallback(tokens, index, parameterStart) || 'ARROW_FUNCTION';
       addFunction({ startToken: parameterStart, endToken: bodyEnd, bodyStart: tokens[bodyStart]?.value === '{' ? bodyStart : bodyStart, bodyEnd, name, role });

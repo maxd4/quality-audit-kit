@@ -73,6 +73,61 @@ test('maintainability measures JS, MJS, TS, TSX, arrows and nested callbacks wit
   }
 });
 
+test('TypeScript type-only arrow signatures do not create executable functions', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-maintainability-type-signatures-'));
+  try {
+    fs.writeFileSync(path.join(root, 'types.ts'), `
+type Handler = (value: string) => boolean;
+type Factory = (name: string) => Handler;
+type ObjectHandlers = { handle: (value: string) => boolean };
+interface Handlers {
+  handle: (value: string) => boolean;
+}
+export type Callback = (value: number) => void;
+declare const declared: (value: string) => boolean;
+let declaredSignature: (value: string) => boolean;
+`, 'utf8');
+    const result = analyzeRepository(root);
+    assert.equal(result.status, 'MEASURED');
+    assert.deepEqual(result.coverage.measuredFiles, ['types.ts']);
+    assert.equal(result.coverage.functionsMeasured, 0);
+    assert.deepEqual(result.measurements, []);
+  } finally {
+    cleanupRoot(root);
+  }
+});
+
+test('TypeScript executable arrows retain annotations, identities and nested callbacks', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-maintainability-typed-arrows-'));
+  try {
+    fs.writeFileSync(path.join(root, 'typed-arrows.ts'), `
+type Handler = (value: string) => boolean;
+const handler: Handler = (value: string): boolean => value.length > 0;
+const direct: (value: string) => boolean = (value: string) => value.length > 0;
+const normalize = (items: string[]) => items.map((item: string): string => item.trim());
+`, 'utf8');
+    const result = analyzeRepository(root);
+    const functions = new Map();
+    for (const measurement of result.measurements) {
+      if (!functions.has(measurement.functionId)) functions.set(measurement.functionId, []);
+      functions.get(measurement.functionId).push(measurement);
+    }
+    const roles = [...functions.values()].map((measurements) => measurements[0].astRole).sort();
+    assert.equal(result.status, 'MEASURED');
+    assert.equal(result.coverage.functionsMeasured, 4);
+    assert.equal(functions.size, 4);
+    assert.deepEqual(roles, ['ARROW_FUNCTION', 'ARROW_FUNCTION', 'ARROW_FUNCTION', 'CALLBACK']);
+    assert.equal([...functions.values()].some((measurements) => measurements[0].functionName === 'handler'), true);
+    assert.equal([...functions.values()].some((measurements) => measurements[0].functionName === 'direct'), true);
+    assert.equal([...functions.values()].some((measurements) => measurements[0].functionName === 'normalize'), true);
+    assert.equal([...functions.values()].some((measurements) => measurements[0].astRole === 'CALLBACK'), true);
+    assert.ok([...functions.values()].every((measurements) => measurements.some((measurement) => measurement.metricId === 'cognitiveComplexity')));
+    assert.equal(new Set([...functions.keys()]).size, 4);
+  } finally {
+    cleanupRoot(root);
+  }
+});
+
 test('discovery failures make coverage partial without discarding valid measurements', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qak-maintainability-discovery-failure-'));
   const readablePath = path.join(root, 'src', 'readable.js');
